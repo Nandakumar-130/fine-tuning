@@ -4,11 +4,37 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger("vLLMEngine")
 
+def get_offline_qwen_tokenizer(model_name_or_path: str = "Qwen/Qwen2.5-7B-Instruct"):
+    """
+    Safely attempts to load the exact Qwen tokenizer from local cache only.
+    - Does NOT download any files from HuggingFace Hub.
+    - Does NOT load any LLM model weights.
+    - Does NOT substitute any other model's tokenizer (e.g. SmolLM2).
+    Returns the tokenizer if locally cached, or None if unavailable offline.
+    """
+    try:
+        from transformers import AutoTokenizer
+        logger.info(f"Attempting offline load of exact Qwen tokenizer: {model_name_or_path} (local_files_only=True)")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            local_files_only=True,
+            trust_remote_code=True
+        )
+        logger.info("Exact Qwen tokenizer loaded successfully from local offline cache.")
+        return tokenizer
+    except Exception as e:
+        logger.warning(
+            f"Exact Qwen tokenizer is NOT available in local offline cache ({e}). "
+            "Pipeline will continue safely using conservative character-based estimation fallback. "
+            "SmolLM2 tokenizer will NOT be silently substituted."
+        )
+        return None
+
 class VLLMClient:
     """
     Offline/Local Inference Engine using vLLM (with fallback to Transformers/CPU if no CUDA GPU).
     Key requirements from PDF:
-    - Load Qwen model ONCE into memory. Do not reload model weights for each chunk.
+    - Load Qwen model ONCE into memory when inference begins. Do not reload model weights for each chunk.
     - Create a fresh prompt/context for each task and clear conversation history.
     - Structured JSON generation.
     - Zero external API keys. All models local or locally cached from Hugging Face.

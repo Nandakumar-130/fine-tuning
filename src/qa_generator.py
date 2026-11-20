@@ -44,7 +44,6 @@ class SequentialPerspectiveQAGenerator:
         ensure_directory(self.qa_dir)
         self.llm = vllm_client
         self.max_qa = max(10, max_qa_per_perspective)
-        self.min_qa = 5
         self.max_attempts = 3
         self.tracker = checkpoint_tracker
         self.slogger = structured_logger
@@ -71,11 +70,13 @@ class SequentialPerspectiveQAGenerator:
         perspective: str,
         fallback_chunk_id: str,
         fallback_pages: List[int],
-        parent_id: Optional[str] = None
+        parent_id: Optional[str] = None,
+        valid_chunk_ids: Optional[List[str]] = None,
+        valid_pages: Optional[List[int]] = None
     ) -> List[RichQARecord]:
         """
         Parses JSON response into rich Q&A objects.
-        Validates question and answer presence.
+        Validates question, answer, and strict multi-chunk provenance.
         """
         clean_json = self._extract_json_block(raw_text)
         data = json.loads(clean_json)
@@ -91,6 +92,9 @@ class SequentialPerspectiveQAGenerator:
             raise ValueError("No Q&A items found in parsed JSON structure.")
 
         valid_records: List[RichQARecord] = []
+        known_chunk_set = set(valid_chunk_ids) if valid_chunk_ids else None
+        known_page_set = set(valid_pages) if valid_pages else None
+
         for idx, item in enumerate(raw_items):
             if not isinstance(item, dict):
                 continue
@@ -99,8 +103,64 @@ class SequentialPerspectiveQAGenerator:
             if len(q) < 5 or len(a) < 2:
                 continue
 
-            chunk_ids = item.get("source_chunk_ids") or [fallback_chunk_id]
-            pages = item.get("source_pages") or fallback_pages
+            raw_chunk_ids = item.get("source_chunk_ids")
+            raw_pages = item.get("source_pages")
+
+            # Strict Multi-Chunk Provenance Validation
+            if perspective == "cross_page":
+                # Must provide explicit source_chunk_ids and source_pages spanning >= 2 chunks and >= 2 pages
+                if not raw_chunk_ids or not isinstance(raw_chunk_ids, list) or len(set(raw_chunk_ids)) < 2:
+                    logger.warning(f"Cross-page Q&A item rejected: requires at least 2 distinct source_chunk_ids, got {raw_chunk_ids}")
+                    continue
+                if not raw_pages or not isinstance(raw_pages, list) or len(set(raw_pages)) < 2:
+                    logger.warning(f"Cross-page Q&A item rejected: requires at least 2 distinct source_pages, got {raw_pages}")
+                    continue
+                # Validate against verified entity group's supplied chunks and pages
+                if known_chunk_set and not set(raw_chunk_ids).issubset(known_chunk_set):
+                    logger.warning(f"Cross-page Q&A contains unrelated/hallucinated chunk IDs: {set(raw_chunk_ids) - known_chunk_set}")
+                    continue
+                if known_page_set and not set(raw_pages).issubset(known_page_set):
+                    logger.warning(f"Cross-page Q&A contains invalid pages not in group: {set(raw_pages) - known_page_set}")
+                    continue
+                chunk_ids = list(dict.fromkeys(raw_chunk_ids))
+                pages = sorted(list(dict.fromkeys(raw_pages)))
+
+            elif perspective == "combined":
+                # Combined Q&A must require at least two distinct supported facts/propositions
+                # If explicit source_chunk_ids provided, validate against known chunks
+                if raw_chunk_ids and isinstance(raw_chunk_ids, list):
+                    if known_chunk_set and not set(raw_chunk_ids).issubset(known_chunk_set):
+                        logger.warning(f"Combined Q&A rejected: cited chunks not in supplied evidence: {set(raw_chunk_ids) - known_chunk_set}")
+                        continue
+                    chunk_ids = list(dict.fromkeys(raw_chunk_ids))
+                else:
+                    chunk_ids = [fallback_chunk_id]
+
+                if raw_pages and isinstance(raw_pages, list):
+                    if known_page_set and not set(raw_pages).issubset(known_page_set):
+                        logger.warning(f"Combined Q&A rejected: cited pages not in chunk: {set(raw_pages) - known_page_set}")
+                        continue
+                    pages = sorted(list(dict.fromkeys(raw_pages)))
+                else:
+                    pages = fallback_pages
+
+            else:
+                # Direct, Indirect, Attribute: Single-chunk generation tasks.
+                # If model provides explicit chunk_ids, verify they do not cite unrelated chunks
+                if raw_chunk_ids and isinstance(raw_chunk_ids, list):
+                    if fallback_chunk_id not in raw_chunk_ids and known_chunk_set and not set(raw_chunk_ids).issubset(known_chunk_set):
+                        logger.warning(f"Single-chunk Q&A item cited unrelated chunks {raw_chunk_ids}; resetting to true chunk {fallback_chunk_id}")
+                        chunk_ids = [fallback_chunk_id]
+                    else:
+                        chunk_ids = list(dict.fromkeys(raw_chunk_ids))
+                else:
+                    chunk_ids = [fallback_chunk_id]
+
+                if raw_pages and isinstance(raw_pages, list):
+                    pages = sorted(list(dict.fromkeys(raw_pages)))
+                else:
+                    pages = fallback_pages
+
             f_ids = item.get("fact_ids") or []
             p_id = item.get("parent_qa_id") or parent_id
 
@@ -130,13 +190,16 @@ class SequentialPerspectiveQAGenerator:
         fallback_chunk_id: str,
         fallback_pages: List[int],
         parent_id: Optional[str] = None,
-        min_required: int = 5
+        valid_chunk_ids: Optional[List[str]] = None,
+        valid_pages: Optional[List[int]] = None
     ) -> List[RichQARecord]:
         """
         Runs generation with up to max_attempts (3 attempts).
-        If JSON/format fails or is malformed, sends error back to Qwen with Prompt G to correct format.
-        If after 3 attempts it still fails, returns whatever valid questions were collected (or empty)
-        and logs so pipeline moves gracefully to next chunk.
+        - Generates up to requested target (max_qa).
+        - Accepts one or more valid questions (>= 1) when grounded in source evidence.
+        - Accepts fewer questions when source contains limited facts without forcing a numerical quota.
+        - Preserves the 3-attempt retry mechanism for genuine formatting, JSON syntax, or model errors.
+        - Uses Prompt G format repair to fix syntax errors without guessing missing facts.
         """
         current_user_prompt = user_prompt
         last_error = ""
@@ -147,10 +210,11 @@ class SequentialPerspectiveQAGenerator:
                 
                 try:
                     records = self._parse_and_validate_items(
-                        response, perspective, fallback_chunk_id, fallback_pages, parent_id
+                        response, perspective, fallback_chunk_id, fallback_pages, parent_id,
+                        valid_chunk_ids=valid_chunk_ids, valid_pages=valid_pages
                     )
                 except Exception as parse_err:
-                    # Format error: Resend to Qwen using Prompt G with the exact parser error
+                    # Genuine formatting or JSON error: Resend to Qwen using Prompt G with parser error
                     logger.warning(
                         f"Attempt {attempt}/{self.max_attempts}: Format error ({parse_err}). Resending to Qwen with error details for correction..."
                     )
@@ -163,22 +227,21 @@ class SequentialPerspectiveQAGenerator:
                         parser_error=str(parse_err)
                     )
                     records = self._parse_and_validate_items(
-                        repaired_text, perspective, fallback_chunk_id, fallback_pages, parent_id
+                        repaired_text, perspective, fallback_chunk_id, fallback_pages, parent_id,
+                        valid_chunk_ids=valid_chunk_ids, valid_pages=valid_pages
                     )
 
-                if len(records) >= min_required:
-                    return records
-                elif len(records) > 0 and attempt == self.max_attempts:
-                    # Max attempts reached, return whatever valid questions we produced
-                    logger.info(f"Target count was {min_required}, obtained {len(records)} valid questions after attempt {attempt}.")
+                # If valid questions were extracted (1 or more supported by evidence), accept immediately
+                if len(records) >= 1:
+                    logger.info(f"Successfully generated and validated {len(records)} {perspective} questions for {fallback_chunk_id}.")
                     return records
                 else:
-                    last_error = f"Only generated {len(records)} questions (needed at least {min_required})."
+                    last_error = "Model returned empty question list or unparseable content."
                     logger.warning(f"Attempt {attempt}/{self.max_attempts}: {last_error} Retrying...")
                     current_user_prompt = (
                         user_prompt +
-                        f"\n\nNOTE: In the previous attempt, only {len(records)} questions were generated. "
-                        f"You MUST generate at least {min_required} to {self.max_qa} distinct questions. Return valid JSON only."
+                        f"\n\nNOTE: The previous attempt returned zero valid question items. "
+                        f"Generate useful, evidence-grounded questions (up to {self.max_qa}) supported by the text. Return valid JSON only."
                     )
 
             except Exception as e:
@@ -215,9 +278,9 @@ class SequentialPerspectiveQAGenerator:
             user_prompt = (
                 f"SOURCE_EVIDENCE:\n{chunk.content}\n\n"
                 f"SOURCE_METADATA:\nChunk IDs: [{chunk.chunk_id}]\nPage numbers: {chunk.page_numbers}\n\n"
-                f"TASK: Generate between 5 and {self.max_qa} (or more if rich evidence permits) useful DIRECT question-answer pairs. "
+                f"TASK: Generate useful, evidence-grounded DIRECT question-answer pairs (up to {self.max_qa}) supported by the text. "
                 "Cover distinct facts, numbers, dates, locations, and actions stated in this chunk. "
-                "Answers must be clear and supported. Do not add facts absent from the evidence. Return strictly valid JSON format:\n"
+                "Answers must be clear and supported. Do not invent questions if evidence is limited. Return strictly valid JSON format:\n"
                 '{"items":[{"question":"...","answer":"...", "fact_ids":[], "source_chunk_ids":["' + chunk.chunk_id + '"], "source_pages":' + str(chunk.page_numbers) + ', "perspective":"direct"}]}'
             )
 
@@ -227,7 +290,8 @@ class SequentialPerspectiveQAGenerator:
                 perspective="direct",
                 fallback_chunk_id=chunk.chunk_id,
                 fallback_pages=chunk.page_numbers,
-                min_required=self.min_qa
+                valid_chunk_ids=[chunk.chunk_id],
+                valid_pages=chunk.page_numbers
             )
 
             # Live file streaming and live reporting
@@ -284,7 +348,7 @@ class SequentialPerspectiveQAGenerator:
                 f"Question: {direct_item.question}\n"
                 f"Answer: {direct_item.answer}\n\n"
                 f"TASK: Focus specifically on this direct Q&A item and the supporting evidence. "
-                f"Generate between 5 and {self.max_qa} (or more if supported) INDIRECT or relationship-focused Q&A pairs from it. "
+                f"Generate useful, relationship-focused Q&A pairs (up to {self.max_qa}) from it where evidence supports them. "
                 'Explore relationships, consequences, context, and connections (e.g. "How is X connected to Y?", "Why did X happen?"). '
                 "Do not simply duplicate the direct question. Verify all answers against the original evidence. Return JSON:\n"
                 '{"items":[{"question":"...","answer":"...", "fact_ids":' + str(direct_item.fact_ids) + ', "source_chunk_ids":["' + primary_chunk_id + '"], "source_pages":' + str(chunk_pages) + ', "perspective":"indirect", "parent_qa_id":"' + direct_item.qa_id + '"}]}'
@@ -297,7 +361,8 @@ class SequentialPerspectiveQAGenerator:
                 fallback_chunk_id=primary_chunk_id,
                 fallback_pages=chunk_pages,
                 parent_id=direct_item.qa_id,
-                min_required=self.min_qa
+                valid_chunk_ids=[primary_chunk_id],
+                valid_pages=chunk_pages
             )
 
             for it in records:
@@ -351,7 +416,7 @@ class SequentialPerspectiveQAGenerator:
                 f"Answer: {indirect_item.answer}\n\n"
                 f"TASK: Focus on this indirect Q&A item and identify specific attributes present in the original evidence "
                 "(e.g. location, specifications, date, amounts, capacities, categories, equipment, roles, division names). "
-                f"Generate between 5 and {self.max_qa} ATTRIBUTE-focused Q&A pairs directly tied to this item. "
+                f"Generate useful ATTRIBUTE-focused Q&A pairs (up to {self.max_qa}) directly tied to this item where evidence permits. "
                 "Do not invent missing attributes. Verify answers strictly against evidence. Return valid JSON:\n"
                 '{"items":[{"question":"...","answer":"...", "fact_ids":' + str(indirect_item.fact_ids) + ', "source_chunk_ids":["' + primary_chunk_id + '"], "source_pages":' + str(chunk_pages) + ', "perspective":"attribute", "parent_qa_id":"' + indirect_item.qa_id + '"}]}'
             )
@@ -363,7 +428,8 @@ class SequentialPerspectiveQAGenerator:
                 fallback_chunk_id=primary_chunk_id,
                 fallback_pages=chunk_pages,
                 parent_id=indirect_item.qa_id,
-                min_required=self.min_qa
+                valid_chunk_ids=[primary_chunk_id],
+                valid_pages=chunk_pages
             )
 
             for it in records:
@@ -412,7 +478,7 @@ class SequentialPerspectiveQAGenerator:
             user_prompt = (
                 f"ORIGINAL_SOURCE_EVIDENCE:\n{chunk.content}\n\n"
                 f"ALL_APPROVED_ATTRIBUTE_QA:\n{batch_summary}\n\n"
-                f"TASK: Generate between 5 and {self.max_qa} COMBINED multi-fact questions. "
+                f"TASK: Generate COMBINED multi-fact questions (up to {self.max_qa}) where supported. "
                 "Each question must require two or more supported facts from this evidence "
                 "(e.g., connecting a division name and its project location, or equipment manufactured and financial output). "
                 "Answers must address every part of the question. Return JSON format:\n"
@@ -425,7 +491,8 @@ class SequentialPerspectiveQAGenerator:
                 perspective="combined",
                 fallback_chunk_id=chunk.chunk_id,
                 fallback_pages=chunk.page_numbers,
-                min_required=self.min_qa
+                valid_chunk_ids=[chunk.chunk_id],
+                valid_pages=chunk.page_numbers
             )
 
             for it in records:
@@ -466,7 +533,7 @@ class SequentialPerspectiveQAGenerator:
             user_prompt = (
                 f"VERIFIED ENTITY:\n{group.entity_name} ({group.verification_notes})\n\n"
                 f"RELATED_SOURCE_CHUNKS:\n{group.combined_evidence}\n\n"
-                f"TASK: Generate between 5 and {self.max_qa} useful questions requiring information from at least two supplied chunks spanning different pages. "
+                f"TASK: Generate useful questions (up to {self.max_qa}) requiring information from at least two supplied chunks spanning different pages. "
                 "Combine evidence accurately across pages. Cite every supporting chunk ID and page. Exclude unrelated chunks.\n"
                 'Return JSON format:\n{"items":[{"question":"...","answer":"...", "source_chunk_ids":' + str(group.chunk_ids) + ', "source_pages":' + str(group.page_numbers) + ', "perspective":"cross_page"}]}'
             )
@@ -477,7 +544,8 @@ class SequentialPerspectiveQAGenerator:
                 perspective="cross_page",
                 fallback_chunk_id=group.group_id,
                 fallback_pages=group.page_numbers,
-                min_required=self.min_qa
+                valid_chunk_ids=group.chunk_ids,
+                valid_pages=group.page_numbers
             )
 
             for it in records:

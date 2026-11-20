@@ -23,7 +23,7 @@ from src.quality_verifier import ExtractionQualityVerifier
 from src.image_association import ImageAssociationManager
 from src.page_organizer import PageOrganizer
 from src.chunker import HybridChunker
-from src.vllm_engine import VLLMClient
+from src.vllm_engine import VLLMClient, get_offline_qwen_tokenizer
 from src.fact_extractor import FactEntityExtractor
 from src.qa_generator import SequentialPerspectiveQAGenerator
 from src.deduplicator import QADeduplicator
@@ -143,12 +143,26 @@ def main():
             tracker.mark_stage_done("page_organization")
 
         # -----------------------------------------------------------------------
+        # Independent Qwen Tokenizer Loading (Offline Only - ZERO Weight Loading)
+        # -----------------------------------------------------------------------
+        logger.info("Attempting independent offline load of exact Qwen tokenizer...")
+        exact_qwen_tokenizer = get_offline_qwen_tokenizer(settings.VLLM_MODEL_NAME_OR_PATH)
+        if exact_qwen_tokenizer is not None:
+            logger.info("Exact Qwen tokenizer successfully attached for structure-aware chunking.")
+        else:
+            logger.warning(
+                "Exact Qwen tokenizer not found in local cache; continuing with documented conservative character-based estimation fallback. "
+                "SmolLM2 tokenizer is NOT substituted."
+            )
+
+        # -----------------------------------------------------------------------
         # Task 6: Structure-Aware Hybrid Chunking & Experiments (400, 600, 800 tokens)
         # -----------------------------------------------------------------------
         chunker = HybridChunker(
             output_dir=output_dir,
             chunk_size=settings.CHUNK_SIZE,
             chunk_overlap=settings.CHUNK_OVERLAP,
+            tokenizer=exact_qwen_tokenizer,
             embedding_model_name=settings.EMBEDDING_MODEL_NAME_OR_PATH
         )
         chunks_file = output_dir / "chunks" / "chunks.jsonl"
@@ -163,9 +177,9 @@ def main():
             slogger.log_event("INFO", "chunking", f"Formed {len(chunks)} coherent chunks")
 
         # -----------------------------------------------------------------------
-        # Initialize Local Inference Engine (vLLM loaded ONCE in memory)
+        # Initialize Local Inference Engine (LOAD ONCE WHEN INFERENCE IS ABOUT TO BEGIN)
         # -----------------------------------------------------------------------
-        logger.info("Initializing Local Inference Engine (LOAD ONCE)...")
+        logger.info("Initializing Local Inference Engine (LOAD ONCE for inference stages)...")
         vllm_client = VLLMClient(
             model_name_or_path=settings.VLLM_MODEL_NAME_OR_PATH,
             use_vllm=settings.USE_VLLM,

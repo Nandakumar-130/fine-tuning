@@ -41,6 +41,7 @@ class HybridChunker:
         self.tokenizer = tokenizer
         self.embedding_model_name = embedding_model_name
         self.use_embeddings = use_embeddings
+        self.is_exact_tokenizer = (tokenizer is not None)
 
         self._embedder = None
         if self.use_embeddings:
@@ -61,7 +62,11 @@ class HybridChunker:
                 return len(self.tokenizer.encode(text))
             except Exception:
                 pass
-        return max(1, len(text) // 4)
+        # Conservative character-based estimation fallback:
+        # In financial reports and tabular data, numbers, currency symbols, and tables average ~3.0 - 3.5 chars/token.
+        # len(text) // 4 can underestimate token count by 25-35%.
+        # We use a safe conservative estimation: max(1, int(len(text) / 3.5))
+        return max(1, int(len(text) / 3.5))
 
     def split_into_sentences(self, text: str) -> List[str]:
         # Split on sentence boundaries preserving abbreviations and numbers
@@ -256,6 +261,95 @@ class HybridChunker:
         logger.info(f"Chunk experiments comparison saved to: {comparison_file}")
         return results
 
+    def run_preflight_density_audit(
+        self,
+        page_records: List[PageRecord],
+        tables: List[TableRecord]
+    ) -> Dict[str, Any]:
+        """
+        Pre-flight chunking validation and token density audit (Section 5 requirements):
+        Inspects extracted page and section content before batch Q&A generation:
+        1. Character counts
+        2. Word counts
+        3. Digit density (financial figures, tables)
+        4. Punctuation and symbol density (currencies, brackets, table pipes)
+        5. Identifies table-heavy and number-heavy pages
+        6. Estimates token counts using exact or conservative fallback method
+        7. Flags unusually dense sections likely to exceed token budget
+        Saves separate audit report to chunks/preflight_density_audit.json without overwriting experiment results.
+        """
+        logger.info("Running offline pre-flight chunking validation and token density audit...")
+        page_audits = []
+        table_dict = {t.table_id: t for t in tables}
+
+        total_chars = 0
+        total_words = 0
+        total_digits = 0
+        total_symbols = 0
+        dense_pages_flagged = []
+
+        for p in page_records:
+            full_text = " ".join([tb.text for tb in p.text_blocks])
+            for tid in p.table_ids:
+                if tid in table_dict:
+                    full_text += " " + table_dict[tid].markdown_content
+
+            char_len = len(full_text)
+            words = full_text.split()
+            word_len = len(words)
+            digits = sum(c.isdigit() for c in full_text)
+            symbols = sum(not c.isalnum() and not c.isspace() for c in full_text)
+
+            digit_ratio = (digits / char_len) if char_len > 0 else 0.0
+            symbol_ratio = (symbols / char_len) if char_len > 0 else 0.0
+            chars_per_word = (char_len / word_len) if word_len > 0 else 0.0
+
+            estimated_tokens = self.count_tokens(full_text)
+            is_dense = (digit_ratio > 0.08) or (symbol_ratio > 0.12) or (len(p.table_ids) > 0)
+
+            audit_item = {
+                "page_number": p.page_number,
+                "character_count": char_len,
+                "word_count": word_len,
+                "digit_count": digits,
+                "digit_density": round(digit_ratio, 4),
+                "symbol_density": round(symbol_ratio, 4),
+                "chars_per_word": round(chars_per_word, 2),
+                "has_tables": len(p.table_ids) > 0,
+                "table_count": len(p.table_ids),
+                "estimated_tokens": estimated_tokens,
+                "token_method": "exact_qwen_tokenizer" if self.is_exact_tokenizer else "conservative_character_estimate (3.5 chars/tok)",
+                "flagged_dense_financial": is_dense
+            }
+            page_audits.append(audit_item)
+
+            total_chars += char_len
+            total_words += word_len
+            total_digits += digits
+            total_symbols += symbols
+            if is_dense:
+                dense_pages_flagged.append(p.page_number)
+
+        summary = {
+            "total_pages_audited": len(page_records),
+            "total_characters": total_chars,
+            "total_words": total_words,
+            "overall_digit_density": round(total_digits / max(1, total_chars), 4),
+            "overall_symbol_density": round(total_symbols / max(1, total_chars), 4),
+            "exact_tokenizer_active": self.is_exact_tokenizer,
+            "token_counting_method": "exact_qwen_tokenizer" if self.is_exact_tokenizer else "conservative_character_estimate (3.5 chars/tok)",
+            "flagged_dense_pages_count": len(dense_pages_flagged),
+            "flagged_dense_pages": dense_pages_flagged[:50],
+            "page_details": page_audits
+        }
+
+        audit_file = self.chunks_dir / "preflight_density_audit.json"
+        with open(audit_file, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+
+        logger.info(f"Pre-flight chunking token density audit saved to: {audit_file} (Flagged {len(dense_pages_flagged)} dense pages)")
+        return summary
+
     def chunk_document(
         self,
         page_records: List[PageRecord],
@@ -281,7 +375,8 @@ class HybridChunker:
         write_jsonl(out_file, chunks)
         logger.info(f"Primary chunks saved: {len(chunks)} chunks -> {out_file}")
 
-        # Run 400/600/800 token experiment comparison
+        # Run pre-flight token density audit and 400/600/800 token experiment comparison
+        self.run_preflight_density_audit(page_records, tables)
         self.run_chunking_experiments(page_records, tables)
 
         return chunks
