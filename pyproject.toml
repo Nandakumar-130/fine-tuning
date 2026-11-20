@@ -1,0 +1,32 @@
+[project]
+name = "pdf-to-qa-pipeline"
+version = "0.1.0"
+description = "Production-grade, offline Qwen-based PDF dataset preparation and fine-tuning pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pypdf>=3.17.0",
+    "pymupdf>=1.23.8",
+    "opencv-python>=4.8.0",
+    "pillow>=10.0.0",
+    "numpy>=1.24.0",
+    "paddleocr>=2.7.0",
+    "paddlepaddle>=2.5.0; sys_platform == 'linux'",
+    "symspellpy>=6.7.7",
+    "language-tool-python>=2.7.1",
+    "python-dateutil>=2.8.2",
+    "spacy>=3.7.0",
+    "sentence-transformers>=2.2.2",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+    "transformers>=4.38.0",
+    "accelerate>=0.27.0",
+    "torch>=2.1.0",
+    "tqdm>=4.66.0",
+    "vllm>=0.4.0; sys_platform == 'linux'",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
