@@ -1,7 +1,7 @@
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import logging
 
 from src.schemas import ChunkRecord, FactRecord, EntityIndexRecord, RelatedChunkGroup
