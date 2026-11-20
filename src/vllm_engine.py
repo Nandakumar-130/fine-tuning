@@ -55,7 +55,7 @@ def get_offline_qwen_tokenizer(model_name_or_path: str = "Qwen/Qwen2.5-3B-Instru
     Safely attempts to load the exact Qwen tokenizer from local cache only.
     - Does NOT download any files from HuggingFace Hub.
     - Does NOT load any LLM model weights.
-    - Does NOT substitute any other model's tokenizer (e.g. SmolLM2).
+    - Does NOT substitute any other model's tokenizer.
     Returns the tokenizer if locally cached, or None if unavailable offline.
     """
     try:
@@ -72,7 +72,7 @@ def get_offline_qwen_tokenizer(model_name_or_path: str = "Qwen/Qwen2.5-3B-Instru
         logger.warning(
             f"Exact Qwen tokenizer ({model_name_or_path}) is NOT available in local offline cache ({e}). "
             "Pipeline will continue safely using conservative character-based estimation fallback. "
-            "SmolLM2 tokenizer will NOT be silently substituted."
+            "No incompatible tokenizer will be substituted."
         )
         return None
 

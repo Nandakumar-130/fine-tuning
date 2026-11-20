@@ -1,8 +1,8 @@
-# PDF-to-Q&A Generation & SFT Dataset Preparation Pipeline
+# PDF-to-Q&A Generation Pipeline
 
 A production-grade, 100% offline data engineering and dataset preparation pipeline implementing all specifications of the **PDF-to-Q&A Pipeline Guide**.
 
-Designed to process corporate annual reports and technical documentation (e.g., **Larsen & Toubro Annual Review 2025**, 738 pages) and synthesize a leak-free, verified, multi-perspective instruction dataset for fine-tuning **`HuggingFaceTB/SmolLM2-135M-Instruct`** using **`Qwen/Qwen2.5-3B-Instruct`** and **`Qwen/Qwen2.5-VL-3B-Instruct`** on **Linux / CUDA with vLLM**.
+Designed to process corporate annual reports and technical documentation (e.g., **Larsen & Toubro Annual Review 2025**, 738 pages) and generate high-quality, verified, multi-perspective Q&A datasets using **`Qwen/Qwen2.5-3B-Instruct`** and **`Qwen/Qwen2.5-VL-3B-Instruct`** on **Linux / CUDA with vLLM**.
 
 ---
 
@@ -29,12 +29,13 @@ The pipeline integrates two specialized models using a resource-conscious sequen
   - Extracting quantitative values, axis titles, and metric legends from images.
   - Verifying image-to-text association with surrounding paragraphs.
 
-### 3. Target Fine-Tuning Model: `HuggingFaceTB/SmolLM2-135M-Instruct`
-- The pipeline formats approved Q&A records into standard ChatML conversation format:
+### 3. Generated Dataset Format
+- The pipeline formats all approved Q&A records into standard ChatML conversation format:
   ```json
   {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
   ```
-- Splits datasets 85% train / 15% validation clustered by source fact and chunk ID to eliminate data leakage.
+- Also provides complete rich audit records in `final/approved_qa.jsonl` (including source chunk IDs, page citations, parent QA IDs, and verified fact IDs).
+- Automatically splits output 85% train / 15% validation clustered by source fact and chunk ID to eliminate data leakage.
 
 ---
 

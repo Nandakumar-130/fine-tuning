@@ -172,7 +172,7 @@ def main():
         else:
             logger.warning(
                 "Exact Qwen tokenizer not found in local cache; continuing with documented conservative character-based estimation fallback. "
-                "SmolLM2 tokenizer is NOT substituted."
+                "No external tokenizer will be silently substituted."
             )
 
         # -----------------------------------------------------------------------
