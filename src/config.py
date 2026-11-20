@@ -16,11 +16,11 @@ class Settings(BaseSettings):
 
     # vLLM / Local Model Settings
     VLLM_MODEL_NAME_OR_PATH: str = Field(
-        default="Qwen/Qwen2.5-7B-Instruct",
+        default="Qwen/Qwen2.5-3B-Instruct",
         description="Local path or HuggingFace ID for Qwen LLM"
     )
     VLLM_VL_MODEL_NAME_OR_PATH: str = Field(
-        default="Qwen/Qwen2-VL-7B-Instruct",
+        default="Qwen/Qwen2.5-VL-3B-Instruct",
         description="Local path or HuggingFace ID for Qwen Vision-Language model"
     )
     VLLM_GPU_MEMORY_UTILIZATION: float = Field(

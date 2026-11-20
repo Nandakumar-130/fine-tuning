@@ -1,198 +1,185 @@
-# PDF-to-Q&A Pipeline — Linux & CUDA Production Guide
+# PDF-to-Q&A Generation & SFT Dataset Preparation Pipeline
 
 A production-grade, 100% offline data engineering and dataset preparation pipeline implementing all specifications of the **PDF-to-Q&A Pipeline Guide**.
 
-Optimized for **Linux (Ubuntu / Debian / RHEL) with CUDA and vLLM**. Managed 100% natively using **`uv`**.
+Designed to process corporate annual reports and technical documentation (e.g., **Larsen & Toubro Annual Review 2025**, 738 pages) and synthesize a leak-free, verified, multi-perspective instruction dataset for fine-tuning **`HuggingFaceTB/SmolLM2-135M-Instruct`** using **`Qwen/Qwen2.5-3B-Instruct`** and **`Qwen/Qwen2.5-VL-3B-Instruct`** on **Linux / CUDA with vLLM**.
 
 ---
 
-## 🐧 Linux Quick Setup & Run Instructions
+## 🚀 Model Architecture & Roles
 
-### 1. Prerequisites on Linux (System Packages)
+The pipeline integrates two specialized models using a resource-conscious sequential loading architecture:
 
-Update your Linux system packages and ensure essential build and multimedia libraries are installed:
+### 1. Primary Text LLM: `Qwen/Qwen2.5-3B-Instruct`
+- **Execution Backend:** `vLLM` (with high-throughput PagedAttention and structured JSON generation).
+- **Initialization Lifecycle:** Loaded **ONCE** into memory when inference begins (Task 7) and reused across all tasks without reloading weights.
+- **Responsibilities:**
+  - **Task 7:** Atomic fact & entity proposition extraction (subject-relation-object triples).
+  - **Task 8:** Cross-page entity indexing and relationship detection.
+  - **Tasks 9–13:** Five sequential Q&A perspectives (Direct, Indirect, Attribute, Combined, Cross-Page).
+  - **Task 15:** Independent Qwen-as-a-Judge evidence evaluation (Prompt F).
+  - **Task 16:** Rejection feedback & evidence-grounded answer regeneration.
+  - **Task 16:** JSON schema & syntax repair (Prompt G).
 
+### 2. Vision-Language Model: `Qwen/Qwen2.5-VL-3B-Instruct`
+- **Execution Backend:** `vLLM` / Hugging Face Transformers.
+- **Initialization Lifecycle:** Loaded **only** during Task 4 (Image Understanding) and unloaded immediately (`unload()` + `torch.cuda.empty_cache()`) before the text model loads.
+- **Responsibilities:**
+  - **Task 4:** Visual comprehension of extracted PDF charts, financial diagrams, equipment photographs, and figure labels.
+  - Extracting quantitative values, axis titles, and metric legends from images.
+  - Verifying image-to-text association with surrounding paragraphs.
+
+### 3. Target Fine-Tuning Model: `HuggingFaceTB/SmolLM2-135M-Instruct`
+- The pipeline formats approved Q&A records into standard ChatML conversation format:
+  ```json
+  {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+  ```
+- Splits datasets 85% train / 15% validation clustered by source fact and chunk ID to eliminate data leakage.
+
+---
+
+## 🛠️ Complete 17-Task Pipeline Workflow
+
+```
+[Task 1] Content Inventory Scan ──────► Page types, text density, OCR necessity
+         │
+[Task 2] PDF Extraction ──────────────► Native text, pdfplumber tables, image extraction
+         │
+[Task 3] Quality Verification ────────► SymSpell, Decimal & dateutil validation
+         │
+[Task 4] Vision Understanding ────────► Qwen2.5-VL-3B-Instruct describes charts/diagrams (then unloads)
+         │
+[Task 5] Page Organization ───────────► Unified PageRecord assembly
+         │
+[Task 6] Tokenizer & Chunking ────────► Qwen2.5-3B offline tokenizer, density audit, 400/600/800 experiments
+         │
+[Init]   Text LLM Load Once ──────────► Qwen2.5-3B-Instruct loaded via vLLM
+         │
+[Task 7] Fact Extraction ─────────────► Subject-relation-object propositions
+         │
+[Task 8] Entity Linking ──────────────► Cross-page multi-chunk evidence groups
+         │
+[Tasks 9-13] Five Q&A Perspectives ───► Direct -> Indirect -> Attribute -> Combined -> Cross-Page
+         │
+[Task 14] Deduplication ──────────────► NFKC normalization (preserves valid paraphrases)
+         │
+[Task 15] Qwen-as-a-Judge ─────────────► Prompt F strict evidence verification (PASS/REJECT/REVIEW)
+         │
+[Task 16] Rejection & Repair ─────────► Prompt F feedback regeneration & Prompt G syntax repair
+         │
+[Task 17] Leak-Free SFT Export ───────► ChatML format split 85/15 by fact cluster
+```
+
+---
+
+## ⚙️ Hardware Requirements & Environment Setup
+
+- **Operating System:** Linux (Ubuntu 22.04+ / Debian 12 / RHEL 9) or WSL2 on Windows.
+- **GPU Requirements:** NVIDIA GPU with CUDA support (Compute Capability $\ge 8.0$ recommended).
+- **VRAM Requirements:**
+  - `Qwen2.5-3B-Instruct` (BF16): ~6 GB VRAM.
+  - `Qwen2.5-VL-3B-Instruct` (BF16): ~6 GB VRAM.
+  - Context & KV Cache Buffer: ~2–4 GB.
+  - **Recommended GPU:** 1x NVIDIA RTX 4080 (16 GB), RTX 3090/4090 (24 GB), or A10G/A100.
+- **Pre-Flight Hardware Check:** The pipeline automatically inspects CUDA availability and available VRAM via `check_gpu_resources()`, logging warnings if free memory is constrained.
+
+---
+
+## 📦 Linux / CUDA Installation with `uv`
+
+### 1. System Dependencies
 ```bash
 sudo apt-get update && sudo apt-get install -y \
-    curl \
-    git \
-    build-essential \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    default-jre
+    curl git build-essential libgl1-mesa-glx libglib2.0-0 default-jre
 ```
-*(Note: `default-jre` is recommended for offline LanguageTool grammar audits, and `libgl1-mesa-glx` supports OpenCV/PaddleOCR image operations on headless servers).*
 
----
-
-### 2. Install `uv` on Linux
-
-If `uv` is not already installed:
-
+### 2. Install `uv` & Clone Repository
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
-```
 
-Verify installation:
-```bash
-uv --version
-```
-
----
-
-### 3. Clone Repository & Install Dependencies
-
-```bash
 git clone https://github.com/Nandakumar-130/fine-tuning.git
 cd fine-tuning
-```
-
-Install all dependencies in one command using `uv sync`:
-
-```bash
 uv sync
 ```
 
-**What this does on Linux:**
-- Automatically creates an isolated virtual environment (`.venv`).
-- Installs `vLLM` with high-throughput PagedAttention for NVIDIA GPUs.
-- Installs `opencv-python-headless` (optimized for Linux servers without display servers).
-- Installs `paddleocr`, `paddlepaddle`, `symspellpy`, `python-dateutil`, `sentence-transformers`, `transformers`, `torch`, and `tqdm`.
-
----
-
-### 4. Configuration (`.env`)
-
-Check or edit your `.env` file:
-
+### 3. Environment Configuration (`.env`)
 ```ini
-# Path to your target PDF
 PDF_FILE_PATH=L&T_AR25.pdf
-
-# Output directory for all generated records
 OUTPUT_DIR=PDF_QA_PIPELINE
 
-# Local Model Path or Hugging Face ID (Cached locally, 100% offline)
-VLLM_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-7B-Instruct
-VLLM_VL_MODEL_NAME_OR_PATH=Qwen/Qwen2-VL-7B-Instruct
+VLLM_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-3B-Instruct
+VLLM_VL_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-VL-3B-Instruct
 EMBEDDING_MODEL_NAME_OR_PATH=BAAI/bge-small-en-v1.5
 
-# vLLM Engine Configuration on Linux/CUDA
 USE_VLLM=True
 VLLM_GPU_MEMORY_UTILIZATION=0.85
 VLLM_MAX_MODEL_LEN=4096
 TENSOR_PARALLEL_SIZE=1
 
-# Chunking & Overlap settings
 CHUNK_SIZE=500
 CHUNK_OVERLAP=50
-
-# OCR & Quality Thresholds
-OCR_LANG=en
-USE_GPU_OCR=True
-OCR_CONFIDENCE_ACCEPT=0.95
-OCR_CONFIDENCE_REVIEW=0.80
-
-# Q&A Limits per stage
 MAX_QA_PER_PERSPECTIVE=10
-BATCH_SIZE=4
 TRAIN_VAL_SPLIT_RATIO=0.85
 ```
 
 ---
 
-### 5. Run the Pipeline on Linux
+## 🧪 Separate Testing and Production Execution
 
-Execute the pipeline using `uv run`:
+### Option A: Run the Two-Page Pilot (`run_pilot.py`)
+To verify extraction, image understanding, Q&A perspective cascades, evaluation, and SFT export before running the full 738-page document:
+
+```bash
+uv run python run_pilot.py
+```
+- **Scope:** Processes only pages 1 and 2 of `L&T_AR25.pdf`.
+- **Safety:** Saves all records to `PILOT_QA_PIPELINE/`. Never touches or overwrites production data.
+
+### Option B: Run the Complete Production Pipeline (`main.py`)
+To process the full 738-page document:
 
 ```bash
 uv run python main.py
 ```
 
-#### Running as a Background Daemon on Linux (Optional):
-For large documents where you want the pipeline to run in the background (surviving SSH disconnects):
-
+#### Running as a Background Daemon (surviving SSH disconnects):
 ```bash
 nohup uv run python main.py > pipeline_run.log 2>&1 &
-```
-
-To monitor live progress:
-```bash
 tail -f pipeline_run.log
 ```
 
 ---
 
-## 📺 Live Progress & Console Output
+## 🔄 Checkpointing & Crash Resumption
 
-When running, the console displays real-time progress indicators:
-
-```text
-[Live Q&A Stage 1: Direct]: 100%|██████████| 12/12 [00:45<00:00, 3.8s/chunk]
-  [LIVE Q&A #0001] [Direct] chunk_001 (Pages [1]): "Which division does L&T operate in Chennai?..."
-  [LIVE Q&A #0002] [Direct] chunk_001 (Pages [1]): "What equipment does L&T manufacture for energy projects?..."
-  [LIVE Q&A #0003] [Direct] chunk_001 (Pages [1]): "When was the facility established in Chennai?..."
-```
-
-Every generated question is streamed and saved **immediately** to disk as it is created.
-
----
-
-## 🔄 Crash Resilience & Stopping/Resuming
-
-- If you press `Ctrl+C` or the Linux server restarts during Q&A generation, **no progress is lost**.
-- Progress is tracked in `PDF_QA_PIPELINE/logs/checkpoints.json`.
-- When you run `uv run python main.py` again, the pipeline automatically detects completed chunks and **resumes from the exact chunk where it was interrupted**.
-
----
-
-## 📋 Complete 17-Task Implementation Checklist
-
-| # | Task from PDF | Output File Location | Status |
-|---|---|---|---|
-| **1** | Inventory PDF content types | `PDF_QA_PIPELINE/original/content_inventory.jsonl` | ✅ Completed |
-| **2** | Extract text, OCR, tables, and images separately | `PDF_QA_PIPELINE/extracted/text_records.jsonl`<br>`PDF_QA_PIPELINE/extracted/image_records.jsonl`<br>`PDF_QA_PIPELINE/extracted/table_records.jsonl`<br>`PDF_QA_PIPELINE/extracted/images/`<br>`PDF_QA_PIPELINE/extracted/crops/` | ✅ Completed |
-| **3** | Verify OCR, spelling, numbers, dates, order and tables | `PDF_QA_PIPELINE/verified/verified_records.jsonl`<br>*(SymSpell, Decimal, dateutil, coordinate retention)* | ✅ Completed |
-| **4** | Describe images and verify text association | `PDF_QA_PIPELINE/extracted/image_records.jsonl`<br>*(Status: `verified`, `uncertain`, `not_related`)* | ✅ Completed |
-| **5** | Create page-level records | `PDF_QA_PIPELINE/pages/page_records.jsonl` | ✅ Completed |
-| **6** | Chunk and compare 400/600/800 token settings | `PDF_QA_PIPELINE/chunks/chunks.jsonl`<br>`PDF_QA_PIPELINE/chunks/chunk_experiments_comparison.json` | ✅ Completed |
-| **7** | Extract and verify facts/entities | `PDF_QA_PIPELINE/facts/facts.jsonl` | ✅ Completed |
-| **8** | Build entity index and cross-page groups | `PDF_QA_PIPELINE/relationships/entity_index.jsonl`<br>`PDF_QA_PIPELINE/relationships/related_chunk_groups.jsonl` | ✅ Completed |
-| **9** | Generate Direct Q&A (Prompt A) | `PDF_QA_PIPELINE/qa/direct_qa.jsonl` | ✅ Completed |
-| **10** | Generate Indirect from ALL Direct Q&A (Prompt B) | `PDF_QA_PIPELINE/qa/indirect_qa.jsonl` | ✅ Completed |
-| **11** | Generate Attribute from ALL Indirect Q&A (Prompt C) | `PDF_QA_PIPELINE/qa/attribute_qa.jsonl` | ✅ Completed |
-| **12** | Generate Combined from ALL Attribute Q&A (Prompt D) | `PDF_QA_PIPELINE/qa/combined_qa.jsonl` | ✅ Completed |
-| **13** | Generate Cross-Page Q&A from verified groups (Prompt E) | `PDF_QA_PIPELINE/qa/cross_page_qa.jsonl` | ✅ Completed |
-| **14** | Remove exact/normalized duplicates only | `PDF_QA_PIPELINE/quality/exact_duplicates.jsonl`<br>*(Conservative normalization: retains semantic variety)* | ✅ Completed |
-| **15** | Evaluate against original evidence (Prompt F) | `PDF_QA_PIPELINE/quality/evaluation_results.jsonl`<br>*(Decisions: `PASS`, `REJECT`, `REVIEW`)* | ✅ Completed |
-| **16** | Recover failures and audit samples (Prompt G) | `PDF_QA_PIPELINE/quality/rejected_qa.jsonl`<br>`PDF_QA_PIPELINE/logs/processing_logs.jsonl` | ✅ Completed |
-| **17** | Export approved SFT data and split safely | `PDF_QA_PIPELINE/final/train.jsonl`<br>`PDF_QA_PIPELINE/final/validation.jsonl`<br>*(Grouped by fact to eliminate data leakage)* | ✅ Completed |
+- All live generated Q&A records, evaluation decisions, and processing events are flushed immediately to disk (`f.flush()`).
+- Stage-level and chunk-level completion states are tracked in `logs/checkpoints.json`.
+- If execution is interrupted (e.g., server reboot or manual stop), rerun `uv run python main.py`. The pipeline automatically skips completed stages and chunks, resuming seamlessly from the exact interrupted item.
 
 ---
 
 ## 📂 Output Folder Structure
 
 ```
-PDF_QA_PIPELINE/
+PDF_QA_PIPELINE/  (or PILOT_QA_PIPELINE/ for pilot)
 ├── original/
-│   ├── source.pdf                      # Original input PDF
-│   └── content_inventory.jsonl         # Task 1: Inventory of pages, blocks, drawings
+│   └── content_inventory.jsonl         # Task 1: Document layout inventory
 ├── extracted/
-│   ├── text_records.jsonl              # Task 2: Native text blocks with coordinates
-│   ├── image_records.jsonl             # Task 2 & 4: Image IDs, paths, captions & status
-│   ├── table_records.jsonl             # Task 2: Tables with headers, rows & Markdown
-│   ├── images/                         # Extracted embedded images
-│   └── crops/                          # Low-confidence OCR crops for inspection
+│   ├── text_records.jsonl              # Task 2: Native text blocks with bounding boxes
+│   ├── table_records.jsonl             # Task 2: Financial tables with Markdown format
+│   ├── image_records.jsonl             # Task 2 & 4: Image paths, descriptions & status
+│   └── images/                         # Extracted image files
 ├── verified/
-│   └── verified_records.jsonl          # Task 3: Audited text records (SymSpell & Decimal)
+│   └── verified_records.jsonl          # Task 3: Spell-checked & verified text
 ├── pages/
 │   └── page_records.jsonl              # Task 5: Page-level unified records
 ├── chunks/
-│   ├── chunks.jsonl                    # Task 6: Structure-aware chunks with overlap
+│   ├── chunks.jsonl                    # Task 6: Structure-aware chunks
+│   ├── preflight_density_audit.json    # Task 6: Token density & financial page audit
 │   └── chunk_experiments_comparison.json # Task 6: 400 vs 600 vs 800 token evaluation
 ├── facts/
-│   └── facts.jsonl                     # Task 7: Atomic verified factual propositions
+│   └── facts.jsonl                     # Task 7: Verified atomic propositions
 ├── relationships/
 │   ├── entity_index.jsonl              # Task 8: Entity references across pages
 │   └── related_chunk_groups.jsonl      # Task 8: Cross-page multi-chunk evidence groups
@@ -204,15 +191,11 @@ PDF_QA_PIPELINE/
 │   └── cross_page_qa.jsonl             # Task 13: Stage 5 Cross-Page Q&A (Prompt E)
 ├── quality/
 │   ├── exact_duplicates.jsonl          # Task 14: Deduplication log
-│   ├── evaluation_results.jsonl        # Task 15: Independent Prompt F evaluation verdicts
-│   ├── rejected_qa.jsonl               # Task 16: Rejected items & reason audit
-│   └── quality_audit_report.json       # Comprehensive quality audit metrics
-├── final/
-│   ├── approved_qa.jsonl               # Full rich records for all approved Q&A
-│   ├── train.jsonl                     # Task 17: Leak-free SFT train split
-│   └── validation.jsonl                # Task 17: Leak-free SFT validation split
-└── logs/
-    ├── pipeline.log                    # Standard runtime console log
-    ├── processing_logs.jsonl           # Live structured JSONL event log
-    └── checkpoints.json                # Crash recovery checkpoint tracker
+│   ├── evaluation_results.jsonl        # Task 15: Prompt F judge verdicts (PASS/REJECT/REVIEW)
+│   ├── rejected_qa.jsonl               # Task 16: Rejected items & failure reasons
+│   └── quality_audit_report.json       # Pipeline quality metrics
+└── final/
+    ├── approved_qa.jsonl               # Full rich records for all approved Q&A
+    ├── train.jsonl                     # Task 17: Leak-free SFT train split (85%)
+    └── validation.jsonl                # Task 17: Leak-free SFT validation split (15%)
 ```

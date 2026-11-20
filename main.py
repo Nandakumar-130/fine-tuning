@@ -23,7 +23,7 @@ from src.quality_verifier import ExtractionQualityVerifier
 from src.image_association import ImageAssociationManager
 from src.page_organizer import PageOrganizer
 from src.chunker import HybridChunker
-from src.vllm_engine import VLLMClient, get_offline_qwen_tokenizer
+from src.vllm_engine import VLLMClient, VLLMVisionClient, get_offline_qwen_tokenizer
 from src.fact_extractor import FactEntityExtractor
 from src.qa_generator import SequentialPerspectiveQAGenerator
 from src.deduplicator import QADeduplicator
@@ -127,7 +127,27 @@ def main():
         # -----------------------------------------------------------------------
         logger.info(">>> Task 4: Associating Images with Captions & Surrounding Text...")
         image_manager = ImageAssociationManager(output_dir=output_dir)
-        image_records = image_manager.associate_images_with_text(image_records, text_records)
+        
+        # Load Vision Model ONLY if image records exist and need visual understanding
+        vision_client = None
+        images_needing_desc = [img for img in image_records if not img.description]
+        if images_needing_desc and settings.VLLM_VL_MODEL_NAME_OR_PATH:
+            try:
+                logger.info(f"Initializing Qwen2.5-VL-3B-Instruct for visual image understanding ({len(images_needing_desc)} images)...")
+                vision_client = VLLMVisionClient(
+                    model_name_or_path=settings.VLLM_VL_MODEL_NAME_OR_PATH,
+                    use_vllm=settings.USE_VLLM
+                )
+            except Exception as e:
+                logger.warning(f"Could not initialize Vision Client ({e}). Continuing with rule-based captions.")
+                vision_client = None
+
+        image_records = image_manager.associate_images_with_text(image_records, text_records, vllm_client=vision_client)
+
+        # Unload Vision model immediately to free GPU memory for text model
+        if vision_client is not None:
+            vision_client.unload()
+            vision_client = None
 
         # -----------------------------------------------------------------------
         # Task 5: Assemble Unified Page-Level Records
