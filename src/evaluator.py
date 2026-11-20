@@ -1,8 +1,10 @@
 import json
 import re
+import sys
+import logging
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
-import logging
+from tqdm import tqdm
 
 from src.schemas import RichQARecord, EvaluationResult, ChunkRecord
 from src.io_utils import ensure_directory, write_jsonl, append_jsonl_record
@@ -12,28 +14,23 @@ logger = logging.getLogger("IndependentEvaluator")
 
 class IndependentEvaluator:
     """
-    Step 10: Independent Evaluation and Error Recovery
-    PDF Requirements:
-    - Generation and evaluation MUST be separate tasks and separate contexts.
-    - Uses Prompt F:
-      SYSTEM: You are a strict evidence verifier. You did not generate this Q&A.
-      Judge only against original evidence. Do not assume a plausible answer is correct.
-    - Checks:
-      1. Evidence support (every claim supported)
-      2. Relevance to supplied evidence
-      3. Hallucination (invented or contradicted detail)
-      4. Completeness
-      5. Answerability
-      6. Clarity & precision of numbers, dates, units
-      7. Provenance: chunk IDs and page references valid
-    - Decisions:
-      PASS: All required checks pass.
-      REJECT: Unsupported, unanswerable or materially incorrect.
-      REVIEW: Ambiguous evidence or uncertain association.
-    - Saves to:
-      quality/evaluation_results.jsonl
-      quality/rejected_qa.jsonl
-      final/approved_qa.jsonl
+    Step 10: Independent Evaluation & Regenerative Error Recovery
+    PDF Requirements (Pages 8, 10, 12 Prompt F):
+    - Independent Qwen-as-a-Judge: Runs in a completely separate, clean context from generation.
+    - System role: Strict evidence verifier. Does not assume a plausible answer is correct.
+    - Rigorous Verification Criteria:
+        1. Evidence Support: Every single factual claim must be explicitly supported by source.
+        2. Relevance: Question must directly relate to source evidence.
+        3. Hallucination Guard: Identifies any invented or contradicted details.
+        4. Completeness: Answer addresses every part of the question.
+        5. Answerability: Evidence contains enough information to answer.
+        6. Precision: Exact validation for names, numbers, dates, and units.
+        7. Provenance: Valid chunk IDs and page references.
+    - Decision: PASS, REJECT, or REVIEW.
+    - Regenerative Feedback Loop (Requested Feature):
+        When a Q&A is REJECTED due to unsupported claims or inaccuracy, the evaluator feeds
+        the exact rejection reason and unsupported claims back to Qwen to regenerate a corrected,
+        fully grounded Q&A pair. If it passes upon re-verification, it is saved; otherwise rejected.
     """
     def __init__(self, output_dir: str | Path, vllm_client: VLLMClient):
         self.output_dir = Path(output_dir)
@@ -43,12 +40,25 @@ class IndependentEvaluator:
         ensure_directory(self.final_dir)
         self.llm = vllm_client
 
+    def _extract_json_block(self, text: str) -> str:
+        text = text.strip()
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        if match:
+            return match.group(1).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end+1]
+        return text
+
     def evaluate_qa_item(
         self,
         qa: RichQARecord,
         source_evidence: str
     ) -> EvaluationResult:
-        # Check basic provenance first
+        """
+        Qwen-as-a-Judge evaluation using Prompt F from PDF Page 12.
+        """
         if not qa.source_chunk_ids or not qa.source_pages:
             return EvaluationResult(
                 qa_id=qa.qa_id,
@@ -90,10 +100,10 @@ class IndependentEvaluator:
         try:
             clean_json = self._extract_json_block(response_text)
             data = json.loads(clean_json)
-            decision = str(data.get("decision", "REVIEW")).upper()
-            if "PASS" in decision:
+            raw_decision = str(data.get("decision", "REVIEW")).upper()
+            if "PASS" in raw_decision:
                 decision = "PASS"
-            elif "REJECT" in decision:
+            elif "REJECT" in raw_decision:
                 decision = "REJECT"
             else:
                 decision = "REVIEW"
@@ -121,12 +131,73 @@ class IndependentEvaluator:
                 reason=f"Evaluation parsing exception: {e}"
             )
 
+    def regenerate_rejected_qa(
+        self,
+        qa: RichQARecord,
+        source_evidence: str,
+        eval_result: EvaluationResult
+    ) -> Tuple[RichQARecord, EvaluationResult]:
+        """
+        Feedback Loop: Tells Qwen that this Q&A was rejected, gives the exact judge reason
+        and unsupported claims, and asks Qwen to regenerate properly grounded in source evidence.
+        """
+        rejection_feedback = (
+            f"PREVIOUS QUESTION: {qa.question}\n"
+            f"PREVIOUS REJECTED ANSWER: {qa.answer}\n"
+            f"JUDGE REJECTION REASON: {eval_result.reason}\n"
+            f"UNSUPPORTED CLAIMS: {eval_result.unsupported_claims}\n"
+        )
+
+        system_prompt = (
+            "You are a strict, evidence-grounded Q&A generator. "
+            "A previous Q&A formulation was REJECTED by an independent judge for hallucination or inaccuracy. "
+            "Your task is to fix the error and generate a completely accurate, fully supported Q&A pair "
+            "using ONLY the provided source evidence. Do not guess or invent details. Return valid JSON only."
+        )
+
+        user_prompt = (
+            f"ORIGINAL_SOURCE_EVIDENCE:\n{source_evidence}\n\n"
+            f"REJECTION_REPORT:\n{rejection_feedback}\n\n"
+            f"TASK: Regenerate this {qa.perspective} Q&A item properly. "
+            "Ensure the question is directly answerable from the source evidence and every part of the answer "
+            "is 100% verified by the text. Format:\n"
+            '{"question": "...", "answer": "..."}'
+        )
+
+        try:
+            regen_response = self.llm.generate(system_prompt, user_prompt, temperature=0.1)
+            clean_json = self._extract_json_block(regen_response)
+            data = json.loads(clean_json)
+            new_q = str(data.get("question", "")).strip()
+            new_a = str(data.get("answer", "")).strip()
+
+            if len(new_q) >= 5 and len(new_a) >= 2:
+                regenerated_qa = RichQARecord(
+                    qa_id=f"{qa.qa_id}_regen",
+                    question=new_q,
+                    answer=new_a,
+                    perspective=qa.perspective,
+                    parent_qa_id=qa.parent_qa_id,
+                    fact_ids=qa.fact_ids,
+                    source_chunk_ids=qa.source_chunk_ids,
+                    source_pages=qa.source_pages,
+                    evaluation_status="PENDING"
+                )
+                # Re-evaluate the regenerated Q&A through Qwen-as-a-Judge
+                new_eval = self.evaluate_qa_item(regenerated_qa, source_evidence)
+                return regenerated_qa, new_eval
+        except Exception as e:
+            logger.warning(f"Regeneration attempt failed for {qa.qa_id}: {e}")
+
+        # If regeneration failed or was unparseable, return original rejection
+        return qa, eval_result
+
     def evaluate_all(
         self,
         qa_records: List[RichQARecord],
         chunks: List[ChunkRecord]
     ) -> Tuple[List[RichQARecord], List[RichQARecord], List[RichQARecord]]:
-        logger.info(f"Running independent evaluation for {len(qa_records)} Q&A pairs against original source evidence...")
+        logger.info(f"Running independent Qwen-as-a-Judge evaluation for {len(qa_records)} Q&A pairs...")
         chunk_dict = {c.chunk_id: c.content for c in chunks}
 
         eval_results_file = self.quality_dir / "evaluation_results.jsonl"
@@ -137,12 +208,24 @@ class IndependentEvaluator:
         rejected: List[RichQARecord] = []
         reviewed: List[RichQARecord] = []
 
-        for qa in qa_records:
-            # Gather exact original source evidence for this item
+        pbar = tqdm(qa_records, desc="[Qwen-as-a-Judge Evaluation]", unit="qa", file=sys.stdout)
+        for qa in pbar:
             evidence_parts = [chunk_dict[cid] for cid in qa.source_chunk_ids if cid in chunk_dict]
             source_evidence = "\n\n".join(evidence_parts) if evidence_parts else "No evidence text available."
 
             eval_res = self.evaluate_qa_item(qa, source_evidence)
+
+            # If rejected, execute feedback loop: tell Qwen it was rejected and regenerate
+            if eval_res.decision == "REJECT":
+                tqdm.write(f"  [JUDGE REJECTED] {qa.qa_id}: {eval_res.reason}. Resending to Qwen to regenerate...")
+                regen_qa, new_eval = self.regenerate_rejected_qa(qa, source_evidence, eval_res)
+                if new_eval.decision == "PASS":
+                    tqdm.write(f"  [REGEN SUCCESS] {regen_qa.qa_id} successfully fixed and PASSED!")
+                    qa = regen_qa
+                    eval_res = new_eval
+                else:
+                    tqdm.write(f"  [REGEN FAILED] {regen_qa.qa_id} still unsupported ({new_eval.reason}). Final REJECT.")
+
             append_jsonl_record(eval_results_file, eval_res)
 
             qa.evaluation_status = eval_res.decision
@@ -158,21 +241,12 @@ class IndependentEvaluator:
             else:
                 reviewed.append(qa)
 
+            pbar.set_postfix({"PASS": len(passed), "REJECT": len(rejected), "REVIEW": len(reviewed)})
+
         logger.info(
             f"Independent evaluation complete:\n"
-            f"  - PASS: {len(passed)}\n"
-            f"  - REJECT: {len(rejected)}\n"
-            f"  - REVIEW: {len(reviewed)}"
+            f"  - PASS (Approved): {len(passed)}\n"
+            f"  - REJECT (Logged with reasons): {len(rejected)}\n"
+            f"  - REVIEW (Flagged): {len(reviewed)}"
         )
         return passed, rejected, reviewed
-
-    def _extract_json_block(self, text: str) -> str:
-        text = text.strip()
-        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
-        if match:
-            return match.group(1).strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            return text[start:end+1]
-        return text
