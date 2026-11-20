@@ -124,14 +124,14 @@ class VLLMVisionClient:
 
     def _init_hf_vision(self):
         try:
-            from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+            from transformers import AutoProcessor, AutoModelForVision2Seq
             import torch
             device = "cuda" if torch.cuda.is_available() else "cpu"
             dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
 
             logger.info(f"Loading HF Vision Model: {self.model_name_or_path} on {device}")
             self.processor = AutoProcessor.from_pretrained(self.model_name_or_path, trust_remote_code=True)
-            self.engine = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            self.engine = AutoModelForVision2Seq.from_pretrained(
                 self.model_name_or_path,
                 torch_dtype=dtype,
                 device_map=device,
