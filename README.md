@@ -1,78 +1,100 @@
-# PDF-to-Q&A Pipeline — Complete Qwen-Based Dataset Preparation and Fine-Tuning Guide
+# PDF-to-Q&A Pipeline — Linux & CUDA Production Guide
 
-A complete, production-grade, 100% offline data engineering pipeline implementing all specifications of the **PDF-to-Q&A Pipeline Guide**. 
+A production-grade, 100% offline data engineering and dataset preparation pipeline implementing all specifications of the **PDF-to-Q&A Pipeline Guide**.
 
-It handles content inventory, extraction (native text, OCR, tables, images), quality checks (SymSpell, LanguageTool, Decimal, Dateutil), hybrid chunking, fact/entity extraction, cross-page relationship detection, 5-stage sequential perspective Q&A generation (with live console progress and immediate streaming to disk), independent evaluation, and leak-free SFT export.
-
-The project is managed 100% natively using **`uv`**.
+Optimized for **Linux (Ubuntu / Debian / RHEL) with CUDA and vLLM**. Managed 100% natively using **`uv`**.
 
 ---
 
-## 🚀 Quick Start Guide (Install & Run)
+## 🐧 Linux Quick Setup & Run Instructions
 
-### Prerequisites
-- Python 3.10, 3.11, or 3.12
-- `uv` installed ([Install uv guide](https://docs.astral.sh/uv/getting-started/installation/))
-  - On Windows (PowerShell):
-    ```powershell
-    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-    ```
-  - On Linux / macOS:
-    ```bash
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    ```
+### 1. Prerequisites on Linux (System Packages)
+
+Update your Linux system packages and ensure essential build and multimedia libraries are installed:
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+    curl \
+    git \
+    build-essential \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    default-jre
+```
+*(Note: `default-jre` is recommended for offline LanguageTool grammar audits, and `libgl1-mesa-glx` supports OpenCV/PaddleOCR image operations on headless servers).*
 
 ---
 
-### Step 1: Install All Dependencies with `uv`
+### 2. Install `uv` on Linux
 
-Run a single command in your terminal / PowerShell:
+If `uv` is not already installed:
 
-```powershell
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+```
+
+Verify installation:
+```bash
+uv --version
+```
+
+---
+
+### 3. Clone Repository & Install Dependencies
+
+```bash
+git clone https://github.com/Nandakumar-130/fine-tuning.git
+cd fine-tuning
+```
+
+Install all dependencies in one command using `uv sync`:
+
+```bash
 uv sync
 ```
 
-**What this does automatically:**
-- Creates a local virtual environment (`.venv`).
-- Resolves all 330 dependencies locked in `uv.lock`.
-- Installs PyMuPDF, OpenCV, PaddleOCR, SymSpell, LanguageTool, dateutil, SentenceTransformers, vLLM / Transformers, PyTorch, Pydantic, and tqdm.
-- No manual `pip` or virtual environment creation needed.
+**What this does on Linux:**
+- Automatically creates an isolated virtual environment (`.venv`).
+- Installs `vLLM` with high-throughput PagedAttention for NVIDIA GPUs.
+- Installs `opencv-python-headless` (optimized for Linux servers without display servers).
+- Installs `paddleocr`, `paddlepaddle`, `symspellpy`, `python-dateutil`, `sentence-transformers`, `transformers`, `torch`, and `tqdm`.
 
 ---
 
-### Step 2: Configure Environment Variables (`.env`)
+### 4. Configuration (`.env`)
 
-The project is pre-configured with [.env](file:///c:/Users/Soundar/Documents/data/.env). You can adjust any parameter:
+Check or edit your `.env` file:
 
 ```ini
-# 1. Target PDF file path
-PDF_FILE_PATH=PDF-to-Q&A Pipeline — Complete Qwen-Based Dataset Preparation and Fine-Tuning Guide.pdf
+# Path to your target PDF
+PDF_FILE_PATH=L&T_AR25.pdf
 
-# 2. Output folder name or full path where all generated files will be stored
+# Output directory for all generated records
 OUTPUT_DIR=PDF_QA_PIPELINE
 
-# 3. Model identifier or path to local downloaded weights
+# Local Model Path or Hugging Face ID (Cached locally, 100% offline)
 VLLM_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-7B-Instruct
 VLLM_VL_MODEL_NAME_OR_PATH=Qwen/Qwen2-VL-7B-Instruct
 EMBEDDING_MODEL_NAME_OR_PATH=BAAI/bge-small-en-v1.5
 
-# 4. Inference Engine Settings
+# vLLM Engine Configuration on Linux/CUDA
 USE_VLLM=True
 VLLM_GPU_MEMORY_UTILIZATION=0.85
 VLLM_MAX_MODEL_LEN=4096
 TENSOR_PARALLEL_SIZE=1
 
-# 5. Chunking & Overlap
+# Chunking & Overlap settings
 CHUNK_SIZE=500
 CHUNK_OVERLAP=50
 
-# 6. OCR Settings
+# OCR & Quality Thresholds
 OCR_LANG=en
-USE_GPU_OCR=False
+USE_GPU_OCR=True
 OCR_CONFIDENCE_ACCEPT=0.95
 OCR_CONFIDENCE_REVIEW=0.80
 
-# 7. Q&A Generation Settings
+# Q&A Limits per stage
 MAX_QA_PER_PERSPECTIVE=10
 BATCH_SIZE=4
 TRAIN_VAL_SPLIT_RATIO=0.85
@@ -80,19 +102,31 @@ TRAIN_VAL_SPLIT_RATIO=0.85
 
 ---
 
-### Step 3: Run the Complete Pipeline
+### 5. Run the Pipeline on Linux
 
-Run the pipeline using:
+Execute the pipeline using `uv run`:
 
-```powershell
+```bash
 uv run python main.py
+```
+
+#### Running as a Background Daemon on Linux (Optional):
+For large documents where you want the pipeline to run in the background (surviving SSH disconnects):
+
+```bash
+nohup uv run python main.py > pipeline_run.log 2>&1 &
+```
+
+To monitor live progress:
+```bash
+tail -f pipeline_run.log
 ```
 
 ---
 
 ## 📺 Live Progress & Console Output
 
-While the code runs, you will see a live progress bar and real-time question generation in your console:
+When running, the console displays real-time progress indicators:
 
 ```text
 [Live Q&A Stage 1: Direct]: 100%|██████████| 12/12 [00:45<00:00, 3.8s/chunk]
@@ -101,21 +135,19 @@ While the code runs, you will see a live progress bar and real-time question gen
   [LIVE Q&A #0003] [Direct] chunk_001 (Pages [1]): "When was the facility established in Chennai?..."
 ```
 
-Every single question is streamed and saved **immediately** to disk as it is generated.
+Every generated question is streamed and saved **immediately** to disk as it is created.
 
 ---
 
 ## 🔄 Crash Resilience & Stopping/Resuming
 
-- If you press `Ctrl+C` or turn off your computer during Q&A generation, **you will not lose any progress**.
-- The checkpoint tracker saves the state to `PDF_QA_PIPELINE/logs/checkpoints.json`.
+- If you press `Ctrl+C` or the Linux server restarts during Q&A generation, **no progress is lost**.
+- Progress is tracked in `PDF_QA_PIPELINE/logs/checkpoints.json`.
 - When you run `uv run python main.py` again, the pipeline automatically detects completed chunks and **resumes from the exact chunk where it was interrupted**.
 
 ---
 
 ## 📋 Complete 17-Task Implementation Checklist
-
-All 17 tasks from the PDF guide have been fully implemented and verified:
 
 | # | Task from PDF | Output File Location | Status |
 |---|---|---|---|
@@ -139,9 +171,7 @@ All 17 tasks from the PDF guide have been fully implemented and verified:
 
 ---
 
-## 📂 Detailed Output Folder Structure
-
-Every stage stores its data into its own dedicated file inside the `OUTPUT_DIR`:
+## 📂 Output Folder Structure
 
 ```
 PDF_QA_PIPELINE/
@@ -185,32 +215,4 @@ PDF_QA_PIPELINE/
     ├── pipeline.log                    # Standard runtime console log
     ├── processing_logs.jsonl           # Live structured JSONL event log
     └── checkpoints.json                # Crash recovery checkpoint tracker
-```
-
----
-
-## 🎯 Fine-Tuning Format Output (`final/train.jsonl` & `final/validation.jsonl`)
-
-The dataset is formatted for direct fine-tuning with Qwen models:
-
-```json
-{
-  "id": "qa_dir_chunk_001_00",
-  "messages": [
-    {
-      "role": "user",
-      "content": "Which division does L&T operate in Chennai?"
-    },
-    {
-      "role": "assistant",
-      "content": "L&T operates a heavy engineering division in Chennai."
-    }
-  ],
-  "metadata": {
-    "perspective": "direct",
-    "source_chunk_ids": ["chunk_001"],
-    "source_pages": [1],
-    "fact_ids": ["fact_chunk_001_00"]
-  }
-}
 ```

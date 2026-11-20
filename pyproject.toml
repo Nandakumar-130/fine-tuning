@@ -1,30 +1,41 @@
 [project]
 name = "pdf-to-qa-pipeline"
 version = "0.1.0"
-description = "Production-grade, offline Qwen-based PDF dataset preparation and fine-tuning pipeline"
+description = "Production-grade, offline Qwen-based PDF dataset preparation and fine-tuning pipeline on Linux/CUDA"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # 1. Core PDF & Image Processing
     "pypdf>=3.17.0",
     "pymupdf>=1.23.8",
-    "opencv-python>=4.8.0",
+    "opencv-python-headless>=4.8.0",
     "pillow>=10.0.0",
     "numpy>=1.24.0",
+
+    # 2. Local OCR Engine (Offline Linux CPU/GPU)
     "paddleocr>=2.7.0",
-    "paddlepaddle>=2.5.0; sys_platform == 'linux'",
+    "paddlepaddle>=2.5.0",
+
+    # 3. Quality & Verification (PDF Section 2)
     "symspellpy>=6.7.7",
     "language-tool-python>=2.7.1",
     "python-dateutil>=2.8.2",
+
+    # 4. Text Structure & Embeddings
     "spacy>=3.7.0",
     "sentence-transformers>=2.2.2",
+
+    # 5. Configuration & Schemas
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",
     "python-dotenv>=1.0.0",
+
+    # 6. High-Throughput Local Offline LLM Inference (vLLM on Linux / CUDA)
+    "vllm>=0.4.0",
     "transformers>=4.38.0",
     "accelerate>=0.27.0",
     "torch>=2.1.0",
     "tqdm>=4.66.0",
-    "vllm>=0.4.0; sys_platform == 'linux'",
 ]
 
 [build-system]

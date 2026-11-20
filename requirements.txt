@@ -1,41 +1,34 @@
 # ==============================================================================
-# PDF-to-Q&A Pipeline Complete Dependencies
-# Fast local installation with uv:
-#   uv pip install -r requirements.txt
+# PDF-to-Q&A Pipeline Linux Dependencies (100% Offline & Local Execution)
 # ==============================================================================
 
-# 1. PDF Parsing, Layout & Coordinate Extraction
+# 1. Core PDF & Image Processing
 pypdf>=3.17.0
 pymupdf>=1.23.8
-
-# 2. Image Preprocessing & OCR
-opencv-python>=4.8.0
+opencv-python-headless>=4.8.0
 pillow>=10.0.0
 numpy>=1.24.0
-paddleocr>=2.7.0
-paddlepaddle>=2.5.0; sys_platform == 'linux'
 
-# 3. Extraction Quality Verification Tools (from PDF Section 2, Page 2)
-# Spelling audit without blindly altering names:
+# 2. Local OCR Engine (Offline Linux)
+paddleocr>=2.7.0
+paddlepaddle>=2.5.0
+
+# 3. Quality & Verification Tools (PDF Section 2)
 symspellpy>=6.7.7
-# Grammar warning audit (technical terms may be unusual):
 language-tool-python>=2.7.1
-# Date format parsing and source validation:
 python-dateutil>=2.8.2
 
-# 4. Text Structure, Sentence Splitting & Embeddings
+# 4. Text Structure & Embeddings
 spacy>=3.7.0
 sentence-transformers>=2.2.2
 
-# 5. Configuration, Validation & Environment
+# 5. Configuration & Schemas
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 
-# 6. Local Offline LLM Inference & Tokenization
-# Linux with CUDA: vLLM provides optimal high-throughput batching.
-# Windows / CPU: HuggingFace Transformers + PyTorch provides full offline fallback.
-vllm>=0.4.0; sys_platform == 'linux'
+# 6. High-Throughput Local LLM Inference (vLLM for Linux/CUDA)
+vllm>=0.4.0
 transformers>=4.38.0
 accelerate>=0.27.0
 torch>=2.1.0
