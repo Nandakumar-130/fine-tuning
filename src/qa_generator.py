@@ -14,21 +14,22 @@ from src.vllm_engine import VLLMClient
 
 logger = logging.getLogger("QAGenerator")
 
+SCHEMA_HINT = '{"items":[{"question":"...","answer":"...","fact_ids":[],"source_chunk_ids":[],"source_pages":[],"parent_qa_id":"..."}]}'
+
 class SequentialPerspectiveQAGenerator:
     """
     Step 8: Sequential Perspective-Based Q&A Generation
-    Strict sequential order from PDF:
-      Stage 1: Direct Q&A (Prompt A)
-      Stage 2: Indirect Q&A (Prompt B) from ALL approved Direct Q&A + original evidence
-      Stage 3: Attribute Q&A (Prompt C) from ALL approved Indirect Q&A + original evidence
-      Stage 4: Combined Q&A (Prompt D) from ALL approved Attribute Q&A + original evidence
-      Stage 5: Cross-page Q&A (Prompt E) from verified cross-page multi-chunk groups
-
-    Key Live Features:
-      - Live console progress bar (tqdm) showing exactly which chunk is processing.
-      - Live real-time counter: prints [LIVE Q&A #Count] for every single question generated.
-      - Live disk streaming (flushed immediately to its separate JSONL file).
-      - Checkpoint tracker: if stopped with Ctrl+C, resumes seamlessly from the exact chunk.
+    Enhanced Requirements:
+      - Direct Q&A: Generates at least 5 to 10 (or more if supported) direct questions per chunk.
+      - Indirect Q&A: Takes each direct Q&A item individually and generates at least 5 to 10 indirect questions from it.
+      - Attribute Q&A: Takes each indirect Q&A item individually and generates at least 5 to 10 attribute questions from it.
+      - Combined Q&A: Generates multi-fact combined questions (requiring >=2 facts).
+      - Cross-Page Q&A: Generates multi-page cross-chunk questions.
+      - Robustness / Rate Limit:
+          * Max 3 retry attempts per unit if questions generated < 5 or on error.
+          * If format error/JSON invalid, resends to Qwen with the exact error message and expected schema (Prompt G) to self-correct.
+          * After 3 failed attempts, safely logs and moves on to the next unit without crashing.
+      - Real-time live console tracking and immediate disk streaming to separate JSONL files.
     """
     def __init__(
         self,
@@ -43,75 +44,158 @@ class SequentialPerspectiveQAGenerator:
         ensure_directory(self.qa_dir)
         self.llm = vllm_client
         self.max_qa = max(10, max_qa_per_perspective)
+        self.min_qa = 5
+        self.max_attempts = 3
         self.tracker = checkpoint_tracker
         self.slogger = structured_logger
         self.global_live_counter = 0
 
-    def _extract_qa_items(self, response_text: str, perspective: str, fallback_chunk: ChunkRecord) -> List[RichQARecord]:
-        items: List[RichQARecord] = []
-        try:
-            clean_json = self._extract_json_block(response_text)
-            data = json.loads(clean_json)
-            raw_items = data.get("items", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+    def _extract_json_block(self, text: str) -> str:
+        text = text.strip()
+        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        if match:
+            return match.group(1).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end+1]
+        start_arr = text.find("[")
+        end_arr = text.rfind("]")
+        if start_arr != -1 and end_arr != -1 and end_arr > start_arr:
+            return text[start_arr:end_arr+1]
+        return text
 
-            for idx, item in enumerate(raw_items):
-                q = str(item.get("question", "")).strip()
-                a = str(item.get("answer", "")).strip()
-                if q and a:
-                    chunk_ids = item.get("source_chunk_ids") or [fallback_chunk.chunk_id]
-                    pages = item.get("source_pages") or fallback_chunk.page_numbers
-                    f_ids = item.get("fact_ids") or []
-                    p_id = item.get("parent_qa_id")
+    def _parse_and_validate_items(
+        self,
+        raw_text: str,
+        perspective: str,
+        fallback_chunk_id: str,
+        fallback_pages: List[int],
+        parent_id: Optional[str] = None
+    ) -> List[RichQARecord]:
+        """
+        Parses JSON response into rich Q&A objects.
+        Validates question and answer presence.
+        """
+        clean_json = self._extract_json_block(raw_text)
+        data = json.loads(clean_json)
 
-                    items.append(
-                        RichQARecord(
-                            qa_id=f"qa_{perspective[:3]}_{fallback_chunk.chunk_id}_{idx:02d}",
-                            question=q,
-                            answer=a,
-                            perspective=perspective,
-                            parent_qa_id=p_id,
-                            fact_ids=f_ids,
-                            source_chunk_ids=chunk_ids,
-                            source_pages=pages,
-                            evaluation_status="PENDING"
-                        )
-                    )
-        except Exception as e:
-            if self.slogger:
-                self.slogger.log_event("WARNING", f"{perspective}_qa", f"JSON parsing failed for {fallback_chunk.chunk_id}: {e}")
-            logger.warning(f"Failed parsing {perspective} Q&A items: {e}. Executing Prompt G format repair.")
+        if isinstance(data, dict):
+            raw_items = data.get("items") or data.get("questions") or data.get("qa_pairs") or []
+        elif isinstance(data, list):
+            raw_items = data
+        else:
+            raise ValueError(f"Unrecognized JSON structure type: {type(data)}")
+
+        if not raw_items:
+            raise ValueError("No Q&A items found in parsed JSON structure.")
+
+        valid_records: List[RichQARecord] = []
+        for idx, item in enumerate(raw_items):
+            if not isinstance(item, dict):
+                continue
+            q = str(item.get("question", "")).strip()
+            a = str(item.get("answer", "")).strip()
+            if len(q) < 5 or len(a) < 2:
+                continue
+
+            chunk_ids = item.get("source_chunk_ids") or [fallback_chunk_id]
+            pages = item.get("source_pages") or fallback_pages
+            f_ids = item.get("fact_ids") or []
+            p_id = item.get("parent_qa_id") or parent_id
+
+            clean_chunk_id = re.sub(r'[^a-zA-Z0-9_]', '_', fallback_chunk_id)
+            qa_id = f"qa_{perspective[:3]}_{clean_chunk_id}_{len(valid_records):03d}"
+
+            rec = RichQARecord(
+                qa_id=qa_id,
+                question=q,
+                answer=a,
+                perspective=perspective,
+                parent_qa_id=p_id,
+                fact_ids=f_ids,
+                source_chunk_ids=chunk_ids,
+                source_pages=pages,
+                evaluation_status="PENDING"
+            )
+            valid_records.append(rec)
+
+        return valid_records
+
+    def _generate_with_retry_and_repair(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        perspective: str,
+        fallback_chunk_id: str,
+        fallback_pages: List[int],
+        parent_id: Optional[str] = None,
+        min_required: int = 5
+    ) -> List[RichQARecord]:
+        """
+        Runs generation with up to max_attempts (3 attempts).
+        If JSON/format fails or is malformed, sends error back to Qwen with Prompt G to correct format.
+        If after 3 attempts it still fails, returns whatever valid questions were collected (or empty)
+        and logs so pipeline moves gracefully to next chunk.
+        """
+        current_user_prompt = user_prompt
+        last_error = ""
+
+        for attempt in range(1, self.max_attempts + 1):
             try:
-                schema_hint = '{"items":[{"question":"...","answer":"...","fact_ids":[],"source_chunk_ids":[],"source_pages":[]}]}'
-                repaired = self.llm.repair_json_format(schema_hint, response_text, str(e))
-                clean_json = self._extract_json_block(repaired)
-                data = json.loads(clean_json)
-                raw_items = data.get("items", []) if isinstance(data, dict) else []
-                for idx, item in enumerate(raw_items):
-                    q = str(item.get("question", "")).strip()
-                    a = str(item.get("answer", "")).strip()
-                    if q and a:
-                        items.append(
-                            RichQARecord(
-                                qa_id=f"qa_{perspective[:3]}_{fallback_chunk.chunk_id}_{idx:02d}",
-                                question=q,
-                                answer=a,
-                                perspective=perspective,
-                                parent_qa_id=item.get("parent_qa_id"),
-                                fact_ids=item.get("fact_ids", []),
-                                source_chunk_ids=item.get("source_chunk_ids", [fallback_chunk.chunk_id]),
-                                source_pages=item.get("source_pages", fallback_chunk.page_numbers),
-                                evaluation_status="PENDING"
-                            )
-                        )
-            except Exception as repair_err:
-                if self.slogger:
-                    self.slogger.log_event("ERROR", f"{perspective}_qa", f"Prompt G repair failed for {fallback_chunk.chunk_id}: {repair_err}")
-                logger.error(f"Format repair failed for {perspective} on {fallback_chunk.chunk_id}: {repair_err}")
+                response = self.llm.generate(system_prompt, current_user_prompt, temperature=0.2 if attempt == 1 else 0.4)
+                
+                try:
+                    records = self._parse_and_validate_items(
+                        response, perspective, fallback_chunk_id, fallback_pages, parent_id
+                    )
+                except Exception as parse_err:
+                    # Format error: Resend to Qwen using Prompt G with the exact parser error
+                    logger.warning(
+                        f"Attempt {attempt}/{self.max_attempts}: Format error ({parse_err}). Resending to Qwen with error details for correction..."
+                    )
+                    if self.slogger:
+                        self.slogger.log_event("WARNING", perspective, f"Attempt {attempt} parse error: {parse_err}")
+                    
+                    repaired_text = self.llm.repair_json_format(
+                        expected_schema=SCHEMA_HINT,
+                        invalid_output=response,
+                        parser_error=str(parse_err)
+                    )
+                    records = self._parse_and_validate_items(
+                        repaired_text, perspective, fallback_chunk_id, fallback_pages, parent_id
+                    )
 
-        return items
+                if len(records) >= min_required:
+                    return records
+                elif len(records) > 0 and attempt == self.max_attempts:
+                    # Max attempts reached, return whatever valid questions we produced
+                    logger.info(f"Target count was {min_required}, obtained {len(records)} valid questions after attempt {attempt}.")
+                    return records
+                else:
+                    last_error = f"Only generated {len(records)} questions (needed at least {min_required})."
+                    logger.warning(f"Attempt {attempt}/{self.max_attempts}: {last_error} Retrying...")
+                    current_user_prompt = (
+                        user_prompt +
+                        f"\n\nNOTE: In the previous attempt, only {len(records)} questions were generated. "
+                        f"You MUST generate at least {min_required} to {self.max_qa} distinct questions. Return valid JSON only."
+                    )
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Attempt {attempt}/{self.max_attempts} failed with exception: {e}")
+                if self.slogger:
+                    self.slogger.log_event("WARNING", perspective, f"Attempt {attempt} exception: {e}")
+
+        # If all 3 attempts exhausted
+        logger.error(f"All {self.max_attempts} attempts exhausted for {fallback_chunk_id} ({perspective}). Last error: {last_error}. Moving to next.")
+        if self.slogger:
+            self.slogger.log_event("ERROR", perspective, f"3 attempts failed for {fallback_chunk_id}: {last_error}")
+        return []
 
     # -----------------------------------------------------------------------
     # STAGE 1: Direct Q&A (Prompt A)
+    # Generates at least 5 to 10 (or more) Direct Q&A per chunk
     # -----------------------------------------------------------------------
     def generate_stage1_direct(self, chunks: List[ChunkRecord]) -> List[RichQARecord]:
         stage_name = "direct_qa"
@@ -120,7 +204,7 @@ class SequentialPerspectiveQAGenerator:
 
         system_prompt = (
             "You create evidence-grounded Q&A. Use only supplied evidence. "
-            "Do not use outside knowledge or invent facts. Return JSON only."
+            "Do not use outside knowledge or invent facts. Return valid JSON only."
         )
 
         pbar = tqdm(chunks, desc="[Live Q&A Stage 1: Direct]", unit="chunk", file=sys.stdout)
@@ -131,33 +215,40 @@ class SequentialPerspectiveQAGenerator:
             user_prompt = (
                 f"SOURCE_EVIDENCE:\n{chunk.content}\n\n"
                 f"SOURCE_METADATA:\nChunk IDs: [{chunk.chunk_id}]\nPage numbers: {chunk.page_numbers}\n\n"
-                f"TASK: Generate at least 10 distinct, evidence-grounded DIRECT question-answer pairs covering facts, "
-                "data values, definitions, and actions stated in this chunk. Cover distinct facts where possible. "
-                "Answers must be clear and supported. Do not add facts absent from the evidence. Return:\n"
+                f"TASK: Generate between 5 and {self.max_qa} (or more if rich evidence permits) useful DIRECT question-answer pairs. "
+                "Cover distinct facts, numbers, dates, locations, and actions stated in this chunk. "
+                "Answers must be clear and supported. Do not add facts absent from the evidence. Return strictly valid JSON format:\n"
                 '{"items":[{"question":"...","answer":"...", "fact_ids":[], "source_chunk_ids":["' + chunk.chunk_id + '"], "source_pages":' + str(chunk.page_numbers) + ', "perspective":"direct"}]}'
             )
 
-            resp = self.llm.generate(system_prompt, user_prompt, temperature=0.2)
-            items = self._extract_qa_items(resp, "direct", chunk)
+            records = self._generate_with_retry_and_repair(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                perspective="direct",
+                fallback_chunk_id=chunk.chunk_id,
+                fallback_pages=chunk.page_numbers,
+                min_required=self.min_qa
+            )
 
             # Live file streaming and live reporting
-            for it in items:
+            for it in records:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Direct] {chunk.chunk_id} (Pages {chunk.page_numbers}): \"{it.question[:75]}...\"")
+                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Direct] {chunk.chunk_id}: \"{it.question[:70]}...\"")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, chunk.chunk_id)
             if self.slogger:
-                self.slogger.log_event("INFO", stage_name, f"Generated {len(items)} Direct Q&A for {chunk.chunk_id}")
+                self.slogger.log_event("INFO", stage_name, f"Chunk {chunk.chunk_id} generated {len(records)} Direct Q&A")
 
-            pbar.set_postfix({"Stage1_Q&A_Generated": len(all_stage_records), "Total_Live_Q&A": self.global_live_counter})
+            pbar.set_postfix({"Stage1_Total": len(all_stage_records), "Live_Q&A_Count": self.global_live_counter})
 
         return all_stage_records
 
     # -----------------------------------------------------------------------
     # STAGE 2: Indirect Q&A (Prompt B)
+    # Takes each Direct Q&A item and generates at least 5 to 10 Indirect Q&A from it
     # -----------------------------------------------------------------------
     def generate_stage2_indirect(
         self,
@@ -168,53 +259,63 @@ class SequentialPerspectiveQAGenerator:
         out_file = self.qa_dir / "indirect_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
 
-        direct_by_chunk: Dict[str, List[RichQARecord]] = {}
-        for d in approved_direct_qa:
-            for cid in d.source_chunk_ids:
-                direct_by_chunk.setdefault(cid, []).append(d)
+        chunk_dict = {c.chunk_id: c for c in chunks}
 
         system_prompt = (
             "Generate new question formulations from approved Q&A. "
             "Original evidence is the authority for factual correctness. Return valid JSON only."
         )
 
-        pbar = tqdm(chunks, desc="[Live Q&A Stage 2: Indirect]", unit="chunk", file=sys.stdout)
-        for chunk in pbar:
-            if self.tracker and self.tracker.is_chunk_done(stage_name, chunk.chunk_id):
+        pbar = tqdm(approved_direct_qa, desc="[Live Q&A Stage 2: Indirect (Per Direct Q&A)]", unit="item", file=sys.stdout)
+        for direct_item in pbar:
+            item_checkpoint_key = f"item_{direct_item.qa_id}"
+            if self.tracker and self.tracker.is_chunk_done(stage_name, item_checkpoint_key):
                 continue
 
-            chunk_direct = direct_by_chunk.get(chunk.chunk_id, approved_direct_qa[:10])
-            batch_summary = "\n".join([f"- Direct Q ({q.qa_id}): {q.question} | Ans: {q.answer}" for q in chunk_direct[:10]])
+            # Retrieve original source chunk evidence
+            primary_chunk_id = direct_item.source_chunk_ids[0] if direct_item.source_chunk_ids else "chunk_001"
+            chunk = chunk_dict.get(primary_chunk_id)
+            chunk_content = chunk.content if chunk else "Original evidence content."
+            chunk_pages = chunk.page_numbers if chunk else direct_item.source_pages
 
             user_prompt = (
-                f"ORIGINAL_SOURCE_EVIDENCE:\n{chunk.content}\n\n"
-                f"ALL_APPROVED_DIRECT_QA:\n{batch_summary}\n\n"
-                f"TASK: Review every Direct Q&A item. Generate at least 10 distinct INDIRECT or relationship-focused Q&A pairs. "
-                'Explore new framing such as "How is X connected to Y?" or "Under what conditions does X occur?" '
-                "Do not simply copy Direct questions. Do not invent relationships. Verify answers against original evidence.\n"
-                'Return items with question, answer, fact_ids, source_chunk_ids, source_pages and perspective="indirect".'
+                f"ORIGINAL_SOURCE_EVIDENCE:\n{chunk_content}\n\n"
+                f"TARGET_DIRECT_QA_ITEM:\n"
+                f"Question: {direct_item.question}\n"
+                f"Answer: {direct_item.answer}\n\n"
+                f"TASK: Focus specifically on this direct Q&A item and the supporting evidence. "
+                f"Generate between 5 and {self.max_qa} (or more if supported) INDIRECT or relationship-focused Q&A pairs from it. "
+                'Explore relationships, consequences, context, and connections (e.g. "How is X connected to Y?", "Why did X happen?"). '
+                "Do not simply duplicate the direct question. Verify all answers against the original evidence. Return JSON:\n"
+                '{"items":[{"question":"...","answer":"...", "fact_ids":' + str(direct_item.fact_ids) + ', "source_chunk_ids":["' + primary_chunk_id + '"], "source_pages":' + str(chunk_pages) + ', "perspective":"indirect", "parent_qa_id":"' + direct_item.qa_id + '"}]}'
             )
 
-            resp = self.llm.generate(system_prompt, user_prompt, temperature=0.3)
-            items = self._extract_qa_items(resp, "indirect", chunk)
+            records = self._generate_with_retry_and_repair(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                perspective="indirect",
+                fallback_chunk_id=primary_chunk_id,
+                fallback_pages=chunk_pages,
+                parent_id=direct_item.qa_id,
+                min_required=self.min_qa
+            )
 
-            for it in items:
+            for it in records:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Indirect] {chunk.chunk_id} (Pages {chunk.page_numbers}): \"{it.question[:75]}...\"")
+                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Indirect from {direct_item.qa_id}]: \"{it.question[:70]}...\"")
 
             if self.tracker:
-                self.tracker.mark_chunk_done(stage_name, chunk.chunk_id)
-            if self.slogger:
-                self.slogger.log_event("INFO", stage_name, f"Generated {len(items)} Indirect Q&A for {chunk.chunk_id}")
+                self.tracker.mark_chunk_done(stage_name, item_checkpoint_key)
 
-            pbar.set_postfix({"Stage2_Q&A_Generated": len(all_stage_records), "Total_Live_Q&A": self.global_live_counter})
+            pbar.set_postfix({"Stage2_Total": len(all_stage_records), "Live_Q&A_Count": self.global_live_counter})
 
         return all_stage_records
 
     # -----------------------------------------------------------------------
     # STAGE 3: Attribute Q&A (Prompt C)
+    # Takes each Indirect Q&A item and generates at least 5 to 10 Attribute Q&A from it
     # -----------------------------------------------------------------------
     def generate_stage3_attribute(
         self,
@@ -225,53 +326,62 @@ class SequentialPerspectiveQAGenerator:
         out_file = self.qa_dir / "attribute_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
 
-        indirect_by_chunk: Dict[str, List[RichQARecord]] = {}
-        for ind in approved_indirect_qa:
-            for cid in ind.source_chunk_ids:
-                indirect_by_chunk.setdefault(cid, []).append(ind)
+        chunk_dict = {c.chunk_id: c for c in chunks}
 
         system_prompt = (
             "Create evidence-grounded attribute questions. "
-            "Do not infer attributes that are not stated. Return JSON only."
+            "Do not infer attributes that are not stated. Return valid JSON only."
         )
 
-        pbar = tqdm(chunks, desc="[Live Q&A Stage 3: Attribute]", unit="chunk", file=sys.stdout)
-        for chunk in pbar:
-            if self.tracker and self.tracker.is_chunk_done(stage_name, chunk.chunk_id):
+        pbar = tqdm(approved_indirect_qa, desc="[Live Q&A Stage 3: Attribute (Per Indirect Q&A)]", unit="item", file=sys.stdout)
+        for indirect_item in pbar:
+            item_checkpoint_key = f"item_{indirect_item.qa_id}"
+            if self.tracker and self.tracker.is_chunk_done(stage_name, item_checkpoint_key):
                 continue
 
-            chunk_indirect = indirect_by_chunk.get(chunk.chunk_id, approved_indirect_qa[:10])
-            batch_summary = "\n".join([f"- Indirect Q ({q.qa_id}): {q.question} | Ans: {q.answer}" for q in chunk_indirect[:10]])
+            primary_chunk_id = indirect_item.source_chunk_ids[0] if indirect_item.source_chunk_ids else "chunk_001"
+            chunk = chunk_dict.get(primary_chunk_id)
+            chunk_content = chunk.content if chunk else "Original evidence content."
+            chunk_pages = chunk.page_numbers if chunk else indirect_item.source_pages
 
             user_prompt = (
-                f"ORIGINAL SOURCE EVIDENCE:\n{chunk.content}\n\n"
-                f"ALL_APPROVED_INDIRECT_QA:\n{batch_summary}\n\n"
-                f"TASK: Review all supplied Indirect Q&A. Identify attributes present in the original evidence: "
-                "location, equipment, date, capacity, amount, role, category, metrics, units, etc. "
-                f"Generate at least 10 ATTRIBUTE-focused Q&A pairs. Do not invent missing attributes. Verify answers against evidence.\n"
-                'Return items with question, answer, fact_ids, source_chunk_ids, source_pages and perspective="attribute".'
+                f"ORIGINAL SOURCE EVIDENCE:\n{chunk_content}\n\n"
+                f"TARGET_INDIRECT_QA_ITEM:\n"
+                f"Question: {indirect_item.question}\n"
+                f"Answer: {indirect_item.answer}\n\n"
+                f"TASK: Focus on this indirect Q&A item and identify specific attributes present in the original evidence "
+                "(e.g. location, specifications, date, amounts, capacities, categories, equipment, roles, division names). "
+                f"Generate between 5 and {self.max_qa} ATTRIBUTE-focused Q&A pairs directly tied to this item. "
+                "Do not invent missing attributes. Verify answers strictly against evidence. Return valid JSON:\n"
+                '{"items":[{"question":"...","answer":"...", "fact_ids":' + str(indirect_item.fact_ids) + ', "source_chunk_ids":["' + primary_chunk_id + '"], "source_pages":' + str(chunk_pages) + ', "perspective":"attribute", "parent_qa_id":"' + indirect_item.qa_id + '"}]}'
             )
 
-            resp = self.llm.generate(system_prompt, user_prompt, temperature=0.2)
-            items = self._extract_qa_items(resp, "attribute", chunk)
+            records = self._generate_with_retry_and_repair(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                perspective="attribute",
+                fallback_chunk_id=primary_chunk_id,
+                fallback_pages=chunk_pages,
+                parent_id=indirect_item.qa_id,
+                min_required=self.min_qa
+            )
 
-            for it in items:
+            for it in records:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Attribute] {chunk.chunk_id} (Pages {chunk.page_numbers}): \"{it.question[:75]}...\"")
+                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Attribute from {indirect_item.qa_id}]: \"{it.question[:70]}...\"")
 
             if self.tracker:
-                self.tracker.mark_chunk_done(stage_name, chunk.chunk_id)
-            if self.slogger:
-                self.slogger.log_event("INFO", stage_name, f"Generated {len(items)} Attribute Q&A for {chunk.chunk_id}")
+                self.tracker.mark_chunk_done(stage_name, item_checkpoint_key)
 
-            pbar.set_postfix({"Stage3_Q&A_Generated": len(all_stage_records), "Total_Live_Q&A": self.global_live_counter})
+            pbar.set_postfix({"Stage3_Total": len(all_stage_records), "Live_Q&A_Count": self.global_live_counter})
 
         return all_stage_records
 
     # -----------------------------------------------------------------------
     # STAGE 4: Combined Q&A (Prompt D)
+    # Generates multi-fact questions requiring >= 2 supported facts
     # -----------------------------------------------------------------------
     def generate_stage4_combined(
         self,
@@ -288,10 +398,10 @@ class SequentialPerspectiveQAGenerator:
                 attr_by_chunk.setdefault(cid, []).append(att)
 
         system_prompt = (
-            "Generate multi-fact questions grounded only in supplied evidence. Return JSON only."
+            "Generate multi-fact questions grounded only in supplied evidence. Return valid JSON only."
         )
 
-        pbar = tqdm(chunks, desc="[Live Q&A Stage 4: Combined]", unit="chunk", file=sys.stdout)
+        pbar = tqdm(chunks, desc="[Live Q&A Stage 4: Combined (Multi-Fact)]", unit="chunk", file=sys.stdout)
         for chunk in pbar:
             if self.tracker and self.tracker.is_chunk_done(stage_name, chunk.chunk_id):
                 continue
@@ -302,32 +412,38 @@ class SequentialPerspectiveQAGenerator:
             user_prompt = (
                 f"ORIGINAL_SOURCE_EVIDENCE:\n{chunk.content}\n\n"
                 f"ALL_APPROVED_ATTRIBUTE_QA:\n{batch_summary}\n\n"
-                f"TASK: Generate at least 10 COMBINED multi-fact questions. Each question must require two or more supported facts "
-                "from this chunk (e.g. connecting an action and a date, or a product and its capacity). "
-                "Answers must address every part of the question. Include all supporting chunk IDs and page numbers.\n"
-                'Return items with question, answer, fact_ids, source_chunk_ids, source_pages and perspective="combined".'
+                f"TASK: Generate between 5 and {self.max_qa} COMBINED multi-fact questions. "
+                "Each question must require two or more supported facts from this evidence "
+                "(e.g., connecting a division name and its project location, or equipment manufactured and financial output). "
+                "Answers must address every part of the question. Return JSON format:\n"
+                '{"items":[{"question":"...","answer":"...", "fact_ids":[], "source_chunk_ids":["' + chunk.chunk_id + '"], "source_pages":' + str(chunk.page_numbers) + ', "perspective":"combined"}]}'
             )
 
-            resp = self.llm.generate(system_prompt, user_prompt, temperature=0.3)
-            items = self._extract_qa_items(resp, "combined", chunk)
+            records = self._generate_with_retry_and_repair(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                perspective="combined",
+                fallback_chunk_id=chunk.chunk_id,
+                fallback_pages=chunk.page_numbers,
+                min_required=self.min_qa
+            )
 
-            for it in items:
+            for it in records:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Combined] {chunk.chunk_id} (Pages {chunk.page_numbers}): \"{it.question[:75]}...\"")
+                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Combined] {chunk.chunk_id}: \"{it.question[:70]}...\"")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, chunk.chunk_id)
-            if self.slogger:
-                self.slogger.log_event("INFO", stage_name, f"Generated {len(items)} Combined Q&A for {chunk.chunk_id}")
 
-            pbar.set_postfix({"Stage4_Q&A_Generated": len(all_stage_records), "Total_Live_Q&A": self.global_live_counter})
+            pbar.set_postfix({"Stage4_Total": len(all_stage_records), "Live_Q&A_Count": self.global_live_counter})
 
         return all_stage_records
 
     # -----------------------------------------------------------------------
     # STAGE 5: Cross-Page Q&A (Prompt E)
+    # Generates multi-page Q&A from verified multi-chunk groups
     # -----------------------------------------------------------------------
     def generate_stage5_cross_page(
         self,
@@ -339,7 +455,7 @@ class SequentialPerspectiveQAGenerator:
 
         system_prompt = (
             "Generate multi-page Q&A only from supplied evidence. "
-            "Do not assume similar names refer to the same entity unless evidence confirms it. Return JSON only."
+            "Do not assume similar names refer to the same entity unless evidence confirms it. Return valid JSON only."
         )
 
         pbar = tqdm(related_groups, desc="[Live Q&A Stage 5: Cross-Page]", unit="group", file=sys.stdout)
@@ -350,45 +466,31 @@ class SequentialPerspectiveQAGenerator:
             user_prompt = (
                 f"VERIFIED ENTITY:\n{group.entity_name} ({group.verification_notes})\n\n"
                 f"RELATED_SOURCE_CHUNKS:\n{group.combined_evidence}\n\n"
-                "TASK: Generate at least 5-10 useful questions requiring information from at least two supplied chunks spanning different pages. "
+                f"TASK: Generate between 5 and {self.max_qa} useful questions requiring information from at least two supplied chunks spanning different pages. "
                 "Combine evidence accurately across pages. Cite every supporting chunk ID and page. Exclude unrelated chunks.\n"
-                'Return items with question, answer, source_chunk_ids, source_pages and perspective="cross_page".'
+                'Return JSON format:\n{"items":[{"question":"...","answer":"...", "source_chunk_ids":' + str(group.chunk_ids) + ', "source_pages":' + str(group.page_numbers) + ', "perspective":"cross_page"}]}'
             )
 
-            dummy_chunk = ChunkRecord(
-                chunk_id=group.group_id,
-                page_numbers=group.page_numbers,
-                content=group.combined_evidence,
-                token_count=0
+            records = self._generate_with_retry_and_repair(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                perspective="cross_page",
+                fallback_chunk_id=group.group_id,
+                fallback_pages=group.page_numbers,
+                min_required=self.min_qa
             )
 
-            resp = self.llm.generate(system_prompt, user_prompt, temperature=0.2)
-            items = self._extract_qa_items(resp, "cross_page", dummy_chunk)
-
-            for it in items:
+            for it in records:
                 self.global_live_counter += 1
                 it.source_chunk_ids = group.chunk_ids
                 it.source_pages = group.page_numbers
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Cross-Page] {group.group_id} (Pages {group.page_numbers}): \"{it.question[:75]}...\"")
+                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Cross-Page] {group.group_id}: \"{it.question[:70]}...\"")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, group.group_id)
-            if self.slogger:
-                self.slogger.log_event("INFO", stage_name, f"Generated {len(items)} Cross-Page Q&A for {group.group_id}")
 
-            pbar.set_postfix({"Stage5_Q&A_Generated": len(all_stage_records), "Total_Live_Q&A": self.global_live_counter})
+            pbar.set_postfix({"Stage5_Total": len(all_stage_records), "Live_Q&A_Count": self.global_live_counter})
 
         return all_stage_records
-
-    def _extract_json_block(self, text: str) -> str:
-        text = text.strip()
-        match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
-        if match:
-            return match.group(1).strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            return text[start:end+1]
-        return text
