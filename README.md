@@ -200,3 +200,77 @@ PDF_QA_PIPELINE/  (or PILOT_QA_PIPELINE/ for pilot)
     ├── train.jsonl                     # Task 17: Leak-free SFT train split (85%)
     └── validation.jsonl                # Task 17: Leak-free SFT validation split (15%)
 ```
+
+---
+
+## ⚡ Quick Run & Package Commands Cheat Sheet
+
+Copy and run these exact commands in your terminal:
+
+### Step 1: Install System & Python Packages
+```bash
+# 1. Install OS build & image dependencies (Linux)
+sudo apt-get update && sudo apt-get install -y curl git build-essential libgl1-mesa-glx libglib2.0-0 default-jre
+
+# 2. Install uv package manager (Fastest Python installer)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
+
+# 3. Clone and install all Python packages automatically
+git clone https://github.com/Nandakumar-130/fine-tuning.git
+cd fine-tuning
+uv sync
+```
+
+*(Alternative with standard pip):*
+```bash
+python -m venv .venv
+# On Linux: source .venv/bin/activate
+# On Windows: .venv\Scripts\activate
+pip install -r pyproject.toml
+```
+
+---
+
+### Step 2: Run the Code
+
+#### A. Run the 2-Page Pilot Test (Safe, Fast Test)
+Test extraction, vision model, Q&A generation, and evaluation on pages 1–2 without touching production data:
+```bash
+uv run python run_pilot.py
+# Or with standard python:
+python run_pilot.py
+```
+
+#### B. Run the Full Production Pipeline (All 738 Pages)
+```bash
+uv run python main.py
+# Or with standard python:
+python main.py
+```
+
+#### C. Run in Background on Remote Linux Server (Survives SSH disconnect)
+```bash
+nohup uv run python main.py > pipeline_run.log 2>&1 &
+tail -f pipeline_run.log
+```
+
+---
+
+### Step 3: Inspect Outputs
+```bash
+# View approved Q&A count
+wc -l PDF_QA_PIPELINE/final/approved_qa.jsonl
+
+# View live processing logs
+tail -n 20 PDF_QA_PIPELINE/logs/processing_logs.jsonl
+```
+
+---
+
+### Step 4: Git Push Commands
+```bash
+git add .
+git commit -m "Update pipeline execution and setup instructions in README.md"
+git push origin main
+```
