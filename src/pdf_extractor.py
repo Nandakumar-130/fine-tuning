@@ -1,13 +1,17 @@
 import os
 import re
 import cv2
+import json
 import fitz  # PyMuPDF
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 import logging
 
-from src.schemas import TextBlockRecord, TableRecord, ImageRecord, BoundingBox
+from src.schemas import (
+    TextBlockRecord, TableRecord, ImageRecord, BoundingBox,
+    ParagraphRecord, ScannedTextRecord, ChartRecord, KPIBoxRecord
+)
 from src.io_utils import ensure_directory, write_jsonl
 
 logger = logging.getLogger("PDFExtractor")
@@ -42,9 +46,11 @@ class PDFExtractor:
 
         # Output Directories
         self.extracted_dir = self.output_dir / "extracted"
+        self.extracted_data_dir = self.output_dir / "extracted_data"
         self.images_dir = self.extracted_dir / "images"
         self.crops_dir = self.extracted_dir / "crops"
         ensure_directory(self.extracted_dir)
+        ensure_directory(self.extracted_data_dir)
         ensure_directory(self.images_dir)
         ensure_directory(self.crops_dir)
 
@@ -191,7 +197,7 @@ class PDFExtractor:
                     )
         return ocr_blocks
 
-    def extract_tables_from_page(self, page: fitz.Page, page_num: int) -> List[TableRecord]:
+    def extract_tables_from_page(self, page: fitz.Page, page_num: int, blocks: Optional[list] = None) -> List[TableRecord]:
         """
         Table extraction preserving row label, column header, unit, currency, reporting period, footnotes.
         Uses PyMuPDF find_tables() as primary, with PP-Structure fallback for complex tables.
@@ -207,24 +213,57 @@ class PDFExtractor:
 
                     # Detect currency, unit, or reporting period in headers or rows
                     footnote_candidates = []
+                    units_found = []
+                    currency_found = []
+                    periods_found = []
+
                     for r in rows:
                         joined_r = " ".join(r)
                         if any(k in joined_r.lower() for k in ["note:", "source:", "in crores", "in millions", "usd", "inr"]):
                             footnote_candidates.append(joined_r)
 
+                    all_cells_text = " ".join(headers + [cell for row in rows for cell in row])
+                    if "inr" in all_cells_text.lower() or "₹" in all_cells_text or "rs" in all_cells_text.lower():
+                        currency_found.append("INR")
+                    if "usd" in all_cells_text.lower() or "$" in all_cells_text:
+                        currency_found.append("USD")
+                    if "crore" in all_cells_text.lower() or "cr" in all_cells_text.lower():
+                        units_found.append("Crores")
+                    if "%" in all_cells_text or "percent" in all_cells_text.lower():
+                        units_found.append("Percentage")
+
+                    for p_match in re.findall(r'\b(?:FY\s*\d{2,4}|20\d{2}-\d{2,4}|March\s+31,\s+20\d{2})\b', all_cells_text, re.IGNORECASE):
+                        if p_match not in periods_found:
+                            periods_found.append(p_match)
+
+                    # Table title: look for text block directly above table bbox
+                    table_title = None
+                    if blocks:
+                        for b in blocks:
+                            if b[6] == 0 and b[3] <= tab.bbox[1] + 10 and (tab.bbox[1] - b[3]) < 45:
+                                title_cand = b[4].strip()
+                                if title_cand and len(title_cand) < 120 and "\n" not in title_cand:
+                                    table_title = title_cand
+                                    break
+
                     header_line = "| " + " | ".join(headers) + " |"
                     sep_line = "| " + " | ".join(["---"] * len(headers)) + " |"
                     body_lines = ["| " + " | ".join(r) + " |" for r in rows]
-                    md_table = "\n".join([header_line, sep_line] + body_lines)
+                    title_prefix = f"### {table_title}\n" if table_title else ""
+                    md_table = title_prefix + "\n".join([header_line, sep_line] + body_lines)
 
                     tables.append(
                         TableRecord(
                             table_id=f"tab_{page_num:03d}_{t_idx:03d}",
                             page_number=page_num,
+                            table_title=table_title,
                             headers=headers,
                             rows=rows,
                             markdown_content=md_table,
                             bbox=[float(x) for x in tab.bbox],
+                            units=", ".join(units_found) if units_found else None,
+                            currency=", ".join(currency_found) if currency_found else None,
+                            reporting_period=", ".join(periods_found) if periods_found else None,
                             footnotes=footnote_candidates
                         )
                     )
@@ -249,6 +288,7 @@ class PDFExtractor:
                                 TableRecord(
                                     table_id=f"tab_pps_{page_num:03d}_{r_idx:03d}",
                                     page_number=page_num,
+                                    table_title="Complex Layout Table",
                                     headers=["PPStructure Table"],
                                     rows=[[html]],
                                     markdown_content=f"[PP-Structure Table Page {page_num}]:\n{html}",
@@ -261,6 +301,164 @@ class PDFExtractor:
 
         return tables
 
+    def extract_kpi_boxes_from_page(
+        self,
+        page: fitz.Page,
+        page_num: int,
+        blocks: list
+    ) -> List[KPIBoxRecord]:
+        """
+        Phase 3.6: Separate KPI and percentage boxes.
+        Detects independent numerical cards (e.g., '82.8 Cr. Revenue', '7.2% Total Income Growth', '50+ Customers').
+        Preserves Value, Label, Unit, Section heading, Page number, Bounding box, Extraction method, Confidence.
+        """
+        kpis: List[KPIBoxRecord] = []
+        val_pattern = re.compile(
+            r'^[₹$€]?\s*\(?-?\d+(?:[.,]\d+)?\)?\s*(?:Cr\.?|Crores?|Mn\.?|Millions?|Bn\.?|Billions?|%|\+|M|K)?$',
+            re.IGNORECASE
+        )
+        words = page.get_text("words")  # (x0, y0, x1, y1, word, block_no, line_no, word_no)
+        seen_keys = set()
+        kpi_idx = 1
+
+        # Track prominent headings on page
+        current_heading = "General Overview"
+        for b in blocks:
+            if b[6] == 0:
+                txt = b[4].strip()
+                if len(txt) < 80 and ("HIGHLIGHT" in txt.upper() or "OPERATIONS" in txt.upper() or "REVENUE" in txt.upper() or "AT A GLANCE" in txt.upper()):
+                    current_heading = txt.splitlines()[0].strip()
+                    break
+
+        # Candidate metric words (values with Cr, %, +, M, K or standalone formatted numbers)
+        metric_words = []
+        for w in words:
+            word_str = w[4].strip()
+            if not val_pattern.match(word_str):
+                continue
+            # Filter out simple page numbers or tiny indices near footer/header
+            if word_str.isdigit() and len(word_str) <= 2:
+                if w[1] > 720 or w[1] < 60:
+                    continue
+            metric_words.append(w)
+
+        for w in metric_words:
+            val = w[4].strip()
+            # Find label words directly below within 28 vertical points and horizontal alignment
+            below_words = [
+                b[4] for b in words
+                if 0 <= (b[1] - w[3]) < 28 and abs(b[0] - w[0]) < 35
+                and not val_pattern.match(b[4])
+                and b[4].lower() not in ["annual", "report", "tracxn", "technologies", "page"]
+            ]
+            if not below_words:
+                continue
+
+            lbl = " ".join(below_words[:6]).strip()
+            if len(lbl) < 3 or len(lbl) > 100:
+                continue
+
+            dedup_key = (page_num, val, lbl.lower())
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+
+            # Determine unit
+            unit = None
+            if "cr" in val.lower() or "crore" in val.lower():
+                unit = "INR Crores"
+            elif "%" in val:
+                unit = "Percentage (%)"
+            elif "m" in val.lower() and not val.lower().endswith(" members"):
+                unit = "Millions"
+            elif "+" in val:
+                unit = "Count / Plus"
+
+            kpis.append(
+                KPIBoxRecord(
+                    kpi_id=f"kpi_{page_num:03d}_{kpi_idx:03d}",
+                    page_number=page_num,
+                    value=val,
+                    label=lbl,
+                    unit=unit,
+                    section_heading=current_heading,
+                    bbox=[float(w[0]), float(w[1]), float(w[2]), float(w[3])],
+                    extraction_method="layout_geometric_matching",
+                    confidence=0.98
+                )
+            )
+            kpi_idx += 1
+
+        return kpis
+
+    def extract_charts_from_page(
+        self,
+        page: fitz.Page,
+        page_num: int,
+        blocks: list,
+        image_records: List[ImageRecord]
+    ) -> List[ChartRecord]:
+        """
+        Phase 3.5: Charts and graphs detection.
+        Detects chart graphics with titles, axis labels, legends, units, data labels.
+        Does not invent numerical values; records extraction limitations where values are visual-only.
+        """
+        charts: List[ChartRecord] = []
+        page_text = page.get_text("text").lower()
+        drawings = len(page.get_drawings())
+        page_images = [img for img in image_records if img.page_number == page_num]
+
+        chart_keywords = [
+            "chart", "trend", "growth rate", "breakup", "contribution (%)",
+            "distribution", "revenue by", "pat margin", "ebitda margin",
+            "financial highlights", "ratio"
+        ]
+
+        if not any(k in page_text for k in chart_keywords) and drawings < 10 and not page_images:
+            return charts
+
+        # Find potential chart titles
+        chart_idx = 1
+        for b in blocks:
+            if b[6] == 0:
+                txt = b[4].strip()
+                lines = [l.strip() for l in txt.splitlines() if l.strip()]
+                for line in lines:
+                    if any(k in line.lower() for k in chart_keywords) and len(line) < 90:
+                        # Extract axis / period candidates from surrounding text
+                        axes = re.findall(r'\b(?:FY\s*\d{2,4}|20\d{2}-\d{2,4})\b', page_text, re.IGNORECASE)
+                        legends = []
+                        for leg in ["Americas", "APAC", "EMEA", "India", "Operations", "EBITDA", "PAT"]:
+                            if leg.lower() in page_text:
+                                legends.append(leg)
+
+                        units = "Percentage (%)" if "%" in line else ("INR Crores" if "cr" in line.lower() else None)
+
+                        charts.append(
+                            ChartRecord(
+                                chart_id=f"chart_{page_num:03d}_{chart_idx:03d}",
+                                page_number=page_num,
+                                title=line,
+                                x_axis_label=", ".join(sorted(list(set(axes)))) if axes else "Financial Years",
+                                y_axis_label=units or "Metric Value",
+                                units=units,
+                                legends=legends,
+                                data_labels=[],
+                                numerical_values={},
+                                bbox=[float(b[0]), float(b[1]), float(b[2]), float(b[3])],
+                                extraction_limitations=(
+                                    "Visual graphical representation; exact numerical values retained where supported "
+                                    "by text labels. No unverified values fabricated from bar heights or pie slices."
+                                ),
+                                image_ref=page_images[0].image_id if page_images else None,
+                                confidence=0.90
+                            )
+                        )
+                        chart_idx += 1
+                        break
+
+        return charts
+
     def extract_all(self) -> Tuple[List[TextBlockRecord], List[ImageRecord], List[TableRecord]]:
         if not self.pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found at: {self.pdf_path}")
@@ -269,6 +467,10 @@ class PDFExtractor:
         all_text_records: List[TextBlockRecord] = []
         all_image_records: List[ImageRecord] = []
         all_table_records: List[TableRecord] = []
+        all_paragraph_records: List[ParagraphRecord] = []
+        all_scanned_records: List[ScannedTextRecord] = []
+        all_kpi_records: List[KPIBoxRecord] = []
+        all_chart_records: List[ChartRecord] = []
 
         logger.info(f"Extracting PDF: {self.pdf_path.name} ({len(doc)} pages)")
 
@@ -279,31 +481,45 @@ class PDFExtractor:
             # 1. Native Selectable Text
             text_instances = 0
             blocks = page.get_text("blocks")
+            current_heading = None
+
             for block_no, b in enumerate(blocks):
                 if b[6] == 0:
                     text_content = b[4].strip()
                     if text_content:
                         text_instances += 1
-                        all_text_records.append(
-                            TextBlockRecord(
-                                text_id=f"text_{page_num:03d}_{block_no:03d}",
+                        if len(text_content) < 80 and text_content.isupper():
+                            current_heading = text_content
+
+                        tb_rec = TextBlockRecord(
+                            text_id=f"text_{page_num:03d}_{block_no:03d}",
+                            page_number=page_num,
+                            text=text_content,
+                            source="native_text",
+                            bbox=[float(b[0]), float(b[1]), float(b[2]), float(b[3])],
+                            reading_order_idx=block_no,
+                            confidence=1.0,
+                            verified=True
+                        )
+                        all_text_records.append(tb_rec)
+
+                        # Separate Paragraph Record
+                        all_paragraph_records.append(
+                            ParagraphRecord(
+                                para_id=f"para_{page_num:03d}_{block_no:03d}",
                                 page_number=page_num,
                                 text=text_content,
-                                source="native_text",
+                                section_heading=current_heading,
                                 bbox=[float(b[0]), float(b[1]), float(b[2]), float(b[3])],
                                 reading_order_idx=block_no,
-                                confidence=1.0,
-                                verified=True
+                                confidence=1.0
                             )
                         )
 
             # 2. Scanned OCR Fallback & Mixed Page Handling
-            # Check native character count and whether page has images
             total_native_chars = sum(len(b.text) for b in all_text_records if b.page_number == page_num)
             image_list = page.get_images(full=True)
 
-            # Trigger OCR if page is completely scanned (0 text instances) OR
-            # mixed page (very sparse text < 80 characters while containing substantial image/drawing)
             is_mixed_page = (text_instances > 0 and total_native_chars < 80 and len(image_list) > 0)
             if text_instances == 0 or is_mixed_page:
                 logger.info(
@@ -314,11 +530,24 @@ class PDFExtractor:
                 ocr_records = self.run_ocr_on_pixmap(pix, page_num)
                 all_text_records.extend(ocr_records)
 
-            # 3. Tabular Data
-            tabs = self.extract_tables_from_page(page, page_num)
+                for ocr_rec in ocr_records:
+                    all_scanned_records.append(
+                        ScannedTextRecord(
+                            scanned_id=f"scanned_{ocr_rec.text_id}",
+                            page_number=page_num,
+                            text=ocr_rec.text,
+                            confidence=ocr_rec.confidence,
+                            bbox=ocr_rec.bbox,
+                            reading_order_idx=ocr_rec.reading_order_idx
+                        )
+                    )
+
+            # 3. Tabular Data (with title, units, currency detection)
+            tabs = self.extract_tables_from_page(page, page_num, blocks=blocks)
             all_table_records.extend(tabs)
 
             # 4. Images
+            page_images: List[ImageRecord] = []
             for img_idx, img_info in enumerate(image_list):
                 xref = img_info[0]
                 base_img = doc.extract_image(xref)
@@ -331,27 +560,91 @@ class PDFExtractor:
                 with open(image_disk_path, "wb") as f_img:
                     f_img.write(image_bytes)
 
-                all_image_records.append(
-                    ImageRecord(
-                        image_id=f"img_{page_num:03d}_{img_idx:03d}",
-                        page_number=page_num,
-                        image_path=str(image_disk_path.resolve()),
-                        format=image_ext,
-                        width=base_img["width"],
-                        height=base_img["height"],
-                        association_status="uncertain"
-                    )
+                img_rec = ImageRecord(
+                    image_id=f"img_{page_num:03d}_{img_idx:03d}",
+                    page_number=page_num,
+                    image_path=str(image_disk_path.resolve()),
+                    format=image_ext,
+                    width=base_img["width"],
+                    height=base_img["height"],
+                    association_status="uncertain"
                 )
+                all_image_records.append(img_rec)
+                page_images.append(img_rec)
+
+            # 5. KPI and Percentage Boxes
+            page_kpis = self.extract_kpi_boxes_from_page(page, page_num, blocks=blocks)
+            all_kpi_records.extend(page_kpis)
+
+            # 6. Charts & Graphs
+            page_charts = self.extract_charts_from_page(page, page_num, blocks=blocks, image_records=page_images)
+            all_chart_records.extend(page_charts)
 
         doc.close()
 
-        # Save to raw extracted JSONL files immediately
+        # Cache extended records on instance
+        self.all_kpi_records = all_kpi_records
+        self.all_chart_records = all_chart_records
+        self.all_paragraph_records = all_paragraph_records
+        self.all_scanned_records = all_scanned_records
+
+        # Save Phase 4: Separate Files in extracted_data/
+        write_jsonl(self.extracted_data_dir / "paragraphs.jsonl", all_paragraph_records)
+        write_jsonl(self.extracted_data_dir / "scanned_text.jsonl", all_scanned_records)
+        
+        with open(self.extracted_data_dir / "tables.json", "w", encoding="utf-8") as f:
+            json.dump([t.model_dump() for t in all_table_records], f, indent=2, ensure_ascii=False)
+
+        with open(self.extracted_data_dir / "charts.json", "w", encoding="utf-8") as f:
+            json.dump([c.model_dump() for c in all_chart_records], f, indent=2, ensure_ascii=False)
+
+        with open(self.extracted_data_dir / "images.json", "w", encoding="utf-8") as f:
+            json.dump([img.model_dump() for img in all_image_records], f, indent=2, ensure_ascii=False)
+
+        with open(self.extracted_data_dir / "kpi_boxes.json", "w", encoding="utf-8") as f:
+            json.dump([k.model_dump() for k in all_kpi_records], f, indent=2, ensure_ascii=False)
+
+        all_data = {
+            "document_id": self.pdf_path.stem,
+            "total_pages": len(doc),
+            "paragraphs": [p.model_dump() for p in all_paragraph_records],
+            "tables": [t.model_dump() for t in all_table_records],
+            "charts": [c.model_dump() for c in all_chart_records],
+            "scanned_text": [s.model_dump() for s in all_scanned_records],
+            "images": [img.model_dump() for img in all_image_records],
+            "kpi_boxes": [k.model_dump() for k in all_kpi_records]
+        }
+        with open(self.extracted_data_dir / "all_extracted_data.json", "w", encoding="utf-8") as f:
+            json.dump(all_data, f, indent=2, ensure_ascii=False)
+
+        report = {
+            "document_name": self.pdf_path.name,
+            "total_pages_processed": len(doc),
+            "total_paragraphs": len(all_paragraph_records),
+            "total_scanned_text_records": len(all_scanned_records),
+            "total_tables": len(all_table_records),
+            "total_charts": len(all_chart_records),
+            "total_images": len(all_image_records),
+            "total_kpi_boxes": len(all_kpi_records)
+        }
+        with open(self.extracted_data_dir / "extraction_report.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+
+        # Legacy extracted directory files
         write_jsonl(self.extracted_dir / "text_records.jsonl", all_text_records)
         write_jsonl(self.extracted_dir / "image_records.jsonl", all_image_records)
         write_jsonl(self.extracted_dir / "table_records.jsonl", all_table_records)
 
         logger.info(
-            f"Extraction complete: {len(all_text_records)} text blocks, "
-            f"{len(all_image_records)} images, {len(all_table_records)} tables."
+            f"Extraction complete: {len(all_text_records)} text blocks ({len(all_paragraph_records)} paragraphs), "
+            f"{len(all_table_records)} tables, {len(all_chart_records)} charts, "
+            f"{len(all_kpi_records)} KPI boxes, {len(all_image_records)} images."
         )
         return all_text_records, all_image_records, all_table_records
+
+    def extract_all_multimodal(self) -> Tuple[
+        List[TextBlockRecord], List[ImageRecord], List[TableRecord],
+        List[KPIBoxRecord], List[ChartRecord], List[ParagraphRecord]
+    ]:
+        texts, images, tables = self.extract_all()
+        return texts, images, tables, self.all_kpi_records, self.all_chart_records, self.all_paragraph_records

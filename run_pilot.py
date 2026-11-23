@@ -21,13 +21,14 @@ from src.config import settings
 from src.schemas import (
     TextBlockRecord, TableRecord, ImageRecord, VerifiedRecord,
     PageRecord, ChunkRecord, FactRecord, EntityIndexRecord,
-    RelatedChunkGroup, RichQARecord
+    RelatedChunkGroup, RichQARecord, KPIBoxRecord, ChartRecord, ContentGroupRecord
 )
-from src.io_utils import ensure_directory, read_jsonl, CheckpointTracker, StructuredLogger
+from src.io_utils import ensure_directory, read_jsonl, write_jsonl, CheckpointTracker, StructuredLogger
 from src.inventory_scanner import ContentInventoryScanner
 from src.pdf_extractor import PDFExtractor
 from src.quality_verifier import ExtractionQualityVerifier
 from src.image_association import ImageAssociationManager
+from src.relationship_mapper import RelationshipMapper
 from src.page_organizer import PageOrganizer
 from src.chunker import HybridChunker
 from src.vllm_engine import VLLMClient, VLLMVisionClient, get_offline_qwen_tokenizer, check_gpu_resources
@@ -114,14 +115,25 @@ def run_pilot(page_start: int = 1, page_end: int = 2):
     logger.info(">>> Pilot Task 5: Page Organization...")
     organizer = PageOrganizer(output_dir=pilot_dir)
     page_records = organizer.assemble_pages(
-        text_blocks=text_records,
+        text_records=text_records,
         tables=table_records,
         images=image_records,
         verified_records=verified_records
     )
 
-    # 6. Structure-Aware Chunking & Tokenizer
-    logger.info(">>> Pilot Task 6: Tokenizer & Chunking...")
+    # 5.5 Relationship Mapping & Content Groups (Phase 5)
+    logger.info(">>> Pilot Task 5.5: Relationship Mapping & Content Groups...")
+    mapper = RelationshipMapper(output_dir=pilot_dir)
+    relationships, content_groups = mapper.map_relationships(
+        paragraphs=getattr(extractor, "all_paragraph_records", []),
+        tables=table_records,
+        charts=getattr(extractor, "all_chart_records", []),
+        kpis=getattr(extractor, "all_kpi_records", []),
+        images=image_records
+    )
+
+    # 6. Structure-Aware Chunking & Tokenizer (5 Strategies)
+    logger.info(">>> Pilot Task 6: Tokenizer & 5-Strategy Hybrid Chunking...")
     exact_qwen_tokenizer = get_offline_qwen_tokenizer(settings.VLLM_MODEL_NAME_OR_PATH)
     chunker = HybridChunker(
         output_dir=pilot_dir,
@@ -130,7 +142,14 @@ def run_pilot(page_start: int = 1, page_end: int = 2):
         tokenizer=exact_qwen_tokenizer,
         embedding_model_name=settings.EMBEDDING_MODEL_NAME_OR_PATH
     )
-    chunks = chunker.chunk_document(page_records, table_records, image_records)
+    chunks = chunker.chunk_document(
+        page_records,
+        table_records,
+        image_records,
+        kpi_boxes=getattr(extractor, "all_kpi_records", []),
+        charts=getattr(extractor, "all_chart_records", []),
+        content_groups=content_groups
+    )
     logger.info(f"Formed {len(chunks)} chunks for pilot.")
 
     # 7. Initialize Qwen2.5-3B-Instruct text LLM (LOAD ONCE)
@@ -163,10 +182,12 @@ def run_pilot(page_start: int = 1, page_end: int = 2):
     indirect_qa = qa_gen.generate_stage2_indirect(chunks, direct_qa)
     attribute_qa = qa_gen.generate_stage3_attribute(chunks, indirect_qa)
     combined_qa = qa_gen.generate_stage4_combined(chunks, attribute_qa)
-    cross_page_qa = qa_gen.generate_stage5_cross_page(related_groups)
+    all_cross_groups = related_groups + content_groups
+    cross_page_qa = qa_gen.generate_stage5_cross_page(all_cross_groups, chunks=chunks)
 
     all_raw_qa = direct_qa + indirect_qa + attribute_qa + combined_qa + cross_page_qa
     logger.info(f"Total raw Q&A generated in pilot: {len(all_raw_qa)}")
+    write_jsonl(pilot_dir / "processed_data" / "generated_qa.jsonl", all_raw_qa)
 
     # 10. Deduplication
     logger.info(">>> Pilot Task 14: Deduplication...")

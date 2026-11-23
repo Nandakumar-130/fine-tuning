@@ -25,8 +25,10 @@ class FactEntityExtractor:
         self.output_dir = Path(output_dir)
         self.facts_dir = self.output_dir / "facts"
         self.relationships_dir = self.output_dir / "relationships"
+        self.processed_dir = self.output_dir / "processed_data"
         ensure_directory(self.facts_dir)
         ensure_directory(self.relationships_dir)
+        ensure_directory(self.processed_dir)
         self.llm = vllm_client
 
     def extract_facts_from_chunk(self, chunk: ChunkRecord) -> List[FactRecord]:
@@ -107,12 +109,14 @@ class FactEntityExtractor:
         logger.info(f"Extracting atomic facts from {len(chunks)} chunks...")
         all_facts: List[FactRecord] = []
         facts_file = self.facts_dir / "facts.jsonl"
+        proc_facts_file = self.processed_dir / "extracted_facts.jsonl"
 
         for chunk in chunks:
             facts = self.extract_facts_from_chunk(chunk)
             all_facts.extend(facts)
             for f in facts:
                 append_jsonl_record(facts_file, f)
+                append_jsonl_record(proc_facts_file, f)
 
         logger.info(f"Fact extraction complete. {len(all_facts)} verified facts saved.")
         return all_facts

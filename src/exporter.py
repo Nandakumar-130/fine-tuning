@@ -25,7 +25,9 @@ class FineTuningExporter:
     def __init__(self, output_dir: str | Path, train_ratio: float = 0.85):
         self.output_dir = Path(output_dir)
         self.final_dir = self.output_dir / "final"
+        self.processed_dir = self.output_dir / "processed_data"
         ensure_directory(self.final_dir)
+        ensure_directory(self.processed_dir)
         self.train_ratio = train_ratio
 
     def export_and_split(
@@ -81,9 +83,13 @@ class FineTuningExporter:
         # Write final train & validation files
         train_file = self.final_dir / "train.jsonl"
         val_file = self.final_dir / "validation.jsonl"
+        proc_train_file = self.processed_dir / "sft_train.jsonl"
+        proc_val_file = self.processed_dir / "sft_val.jsonl"
 
         write_jsonl(train_file, train_sft)
         write_jsonl(val_file, val_sft)
+        write_jsonl(proc_train_file, train_sft)
+        write_jsonl(proc_val_file, val_sft)
 
         logger.info(
             f"SFT Dataset Export complete:\n"

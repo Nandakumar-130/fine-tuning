@@ -23,11 +23,58 @@ class TextBlockRecord(BaseModel):
 class TableRecord(BaseModel):
     table_id: str
     page_number: int
+    table_title: Optional[str] = None
     headers: List[str]
     rows: List[List[str]]
     markdown_content: str
     bbox: Optional[List[float]] = None
+    units: Optional[str] = None
+    currency: Optional[str] = None
+    reporting_period: Optional[str] = None
     footnotes: List[str] = Field(default_factory=list)
+
+class ParagraphRecord(BaseModel):
+    para_id: str
+    page_number: int
+    text: str
+    section_heading: Optional[str] = None
+    bbox: Optional[List[float]] = None
+    reading_order_idx: int = 0
+    confidence: float = 1.0
+
+class ScannedTextRecord(BaseModel):
+    scanned_id: str
+    page_number: int
+    text: str
+    confidence: float
+    bbox: Optional[List[float]] = None
+    reading_order_idx: int = 0
+
+class ChartRecord(BaseModel):
+    chart_id: str
+    page_number: int
+    title: Optional[str] = None
+    x_axis_label: Optional[str] = None
+    y_axis_label: Optional[str] = None
+    units: Optional[str] = None
+    legends: List[str] = Field(default_factory=list)
+    data_labels: List[str] = Field(default_factory=list)
+    numerical_values: Dict[str, Any] = Field(default_factory=dict)
+    bbox: Optional[List[float]] = None
+    extraction_limitations: Optional[str] = None
+    image_ref: Optional[str] = None
+    confidence: float = 1.0
+
+class KPIBoxRecord(BaseModel):
+    kpi_id: str
+    page_number: int
+    value: str
+    label: str
+    unit: Optional[str] = None
+    section_heading: Optional[str] = None
+    bbox: Optional[List[float]] = None
+    extraction_method: str = "layout_box_detection"
+    confidence: float = 1.0
 
 class ImageRecord(BaseModel):
     image_id: str
@@ -79,14 +126,50 @@ class ChunkRecord(BaseModel):
     chunk_id: str
     page_numbers: List[int]
     content: str
+    chunk_strategy: str = Field(
+        default="heading_based",
+        description="'heading_based', 'table_aware', 'layout_aware', 'chart_aware', or 'token_sentence_based'"
+    )
+    section_heading: Optional[str] = None
+    content_group_id: Optional[str] = None
     image_refs: List[str] = Field(default_factory=list)
     table_refs: List[str] = Field(default_factory=list)
+    chart_refs: List[str] = Field(default_factory=list)
+    kpi_refs: List[str] = Field(default_factory=list)
     token_count: int
     source_text_ids: List[str] = Field(default_factory=list)
     experiment_tag: Optional[str] = None  # e.g., '400_tokens', '600_tokens', '800_tokens'
 
 # ---------------------------------------------------------------------------
-# 5. Facts & Entity Index Records
+# 5. Relationship & Content Group Records
+# ---------------------------------------------------------------------------
+class RelationshipRecord(BaseModel):
+    relationship_id: str
+    source_record_id: str
+    target_record_id: str
+    relationship_type: str = Field(
+        description="'heading_match', 'section_hierarchy', 'table_reference', 'chart_caption', 'cross_page_continuity', or 'semantic_similarity'"
+    )
+    reasons: List[str] = Field(default_factory=list)
+    status: str = Field(
+        default="verified",
+        description="'verified' or 'uncertain'"
+    )
+    confidence: float = 1.0
+
+class ContentGroupRecord(BaseModel):
+    group_id: str
+    topic: str
+    section: str
+    source_record_ids: List[str] = Field(default_factory=list)
+    chunk_ids: List[str] = Field(default_factory=list)
+    page_numbers: List[int] = Field(default_factory=list)
+    relationship_reasons: List[str] = Field(default_factory=list)
+    status: str = Field(default="verified", description="'verified' or 'uncertain'")
+    confidence: float = 1.0
+
+# ---------------------------------------------------------------------------
+# 6. Facts & Entity Index Records
 # ---------------------------------------------------------------------------
 class FactRecord(BaseModel):
     fact_id: str

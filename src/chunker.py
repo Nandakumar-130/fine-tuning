@@ -5,7 +5,10 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 import logging
 
-from src.schemas import ChunkRecord, PageRecord, TableRecord, ImageRecord
+from src.schemas import (
+    ChunkRecord, PageRecord, TableRecord, ImageRecord,
+    KPIBoxRecord, ChartRecord, ContentGroupRecord
+)
 from src.io_utils import ensure_directory, write_jsonl
 
 logger = logging.getLogger("HybridChunker")
@@ -35,7 +38,9 @@ class HybridChunker:
     ):
         self.output_dir = Path(output_dir)
         self.chunks_dir = self.output_dir / "chunks"
+        self.processed_dir = self.output_dir / "processed_data"
         ensure_directory(self.chunks_dir)
+        ensure_directory(self.processed_dir)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.tokenizer = tokenizer
@@ -219,6 +224,7 @@ class HybridChunker:
         pages = set()
         text_ids = []
         table_refs = []
+        section_heading = None
 
         for idx in indices:
             u = all_units[idx]
@@ -228,20 +234,177 @@ class HybridChunker:
                 text_ids.append(u["text_id"])
             if "table_id" in u and u["table_id"] not in table_refs:
                 table_refs.append(u["table_id"])
+            if not section_heading and u.get("is_heading"):
+                section_heading = u.get("heading")
 
         combined_text = " ".join(content_parts).strip()
         tokens = self.count_tokens(combined_text)
+
+        # Strategy classification
+        if table_refs and not text_ids:
+            strategy = "table_aware"
+        elif section_heading:
+            strategy = "heading_based"
+        else:
+            strategy = "token_sentence_based"
 
         return ChunkRecord(
             chunk_id=f"chunk_{tag}_{chunk_num:03d}",
             page_numbers=sorted(list(pages)),
             content=combined_text,
+            chunk_strategy=strategy,
+            section_heading=section_heading,
             image_refs=[],
             table_refs=table_refs,
+            chart_refs=[],
+            kpi_refs=[],
             token_count=tokens,
             source_text_ids=text_ids,
             experiment_tag=tag
         )
+
+    def _split_oversized_table(self, tab: TableRecord, max_tokens: int = 700) -> List[ChunkRecord]:
+        """
+        Phase 6.2: Table-Aware Chunking.
+        Splits oversized tables by logical row groups while repeating titles, units,
+        currency, and column headings so no percentage-to-category or financial precision is lost.
+        """
+        chunks: List[ChunkRecord] = []
+        if not tab.rows:
+            return chunks
+
+        header_line = "| " + " | ".join(tab.headers) + " |"
+        sep_line = "| " + " | ".join(["---"] * len(tab.headers)) + " |"
+        title_str = f"### {tab.table_title}\n" if tab.table_title else ""
+        meta_parts = []
+        if tab.units:
+            meta_parts.append(f"Units: {tab.units}")
+        if tab.currency:
+            meta_parts.append(f"Currency: {tab.currency}")
+        if tab.reporting_period:
+            meta_parts.append(f"Period: {tab.reporting_period}")
+        meta_str = f"**Table Metadata:** {', '.join(meta_parts)}\n" if meta_parts else ""
+
+        batch_size = 12
+        for b_idx in range(0, len(tab.rows), batch_size):
+            row_batch = tab.rows[b_idx: b_idx + batch_size]
+            body_lines = ["| " + " | ".join(r) + " |" for r in row_batch]
+            part_num = (b_idx // batch_size) + 1
+            table_part_content = (
+                f"{title_str}{meta_str}"
+                f"[Table {tab.table_id} (Part {part_num}, Page {tab.page_number})]:\n" +
+                "\n".join([header_line, sep_line] + body_lines)
+            )
+            if tab.footnotes:
+                table_part_content += "\nFootnotes: " + "; ".join(tab.footnotes)
+
+            tokens = self.count_tokens(table_part_content)
+            chunks.append(
+                ChunkRecord(
+                    chunk_id=f"chunk_tab_{tab.table_id}_{part_num:02d}",
+                    page_numbers=[tab.page_number],
+                    content=table_part_content,
+                    chunk_strategy="table_aware",
+                    section_heading=tab.table_title or "Financial Table",
+                    table_refs=[tab.table_id],
+                    chart_refs=[],
+                    kpi_refs=[],
+                    token_count=tokens,
+                    source_text_ids=[],
+                    experiment_tag="table_aware"
+                )
+            )
+        return chunks
+
+    def _build_layout_chunks(self, kpis: List[KPIBoxRecord], max_per_chunk: int = 8) -> List[ChunkRecord]:
+        """
+        Phase 6.3: Layout-Aware Chunking.
+        Keeps independent KPI metric cards and layout boxes together with section context.
+        """
+        chunks: List[ChunkRecord] = []
+        if not kpis:
+            return chunks
+
+        kpi_groups: Dict[Tuple[int, str], List[KPIBoxRecord]] = {}
+        for k in kpis:
+            key = (k.page_number, k.section_heading or "Executive Overview")
+            kpi_groups.setdefault(key, []).append(k)
+
+        for (page_num, heading), group_kpis in kpi_groups.items():
+            for b_idx in range(0, len(group_kpis), max_per_chunk):
+                batch = group_kpis[b_idx: b_idx + max_per_chunk]
+                part_idx = (b_idx // max_per_chunk) + 1
+                lines = [
+                    f"### KEY PERFORMANCE INDICATORS & METRICS (Page {page_num} - {heading})",
+                    f"Section Context: {heading}",
+                    f"The following structured KPI metrics and percentage cards were extracted from Page {page_num}:"
+                ]
+                for k in batch:
+                    unit_str = f" ({k.unit})" if k.unit else ""
+                    lines.append(f"- **{k.label}**: `{k.value}`{unit_str}")
+
+                content = "\n".join(lines)
+                tokens = self.count_tokens(content)
+                chunks.append(
+                    ChunkRecord(
+                        chunk_id=f"chunk_kpi_p{page_num:03d}_{part_idx:02d}",
+                        page_numbers=[page_num],
+                        content=content,
+                        chunk_strategy="layout_aware",
+                        section_heading=heading,
+                        kpi_refs=[k.kpi_id for k in batch],
+                        chart_refs=[],
+                        table_refs=[],
+                        token_count=tokens,
+                        source_text_ids=[],
+                        experiment_tag="layout_aware"
+                    )
+                )
+        return chunks
+
+    def _build_chart_chunks(self, charts: List[ChartRecord]) -> List[ChunkRecord]:
+        """
+        Phase 6.4: Chart-Aware Chunking.
+        Keeps chart title, axes, legends, units, data labels, and image references together.
+        """
+        chunks: List[ChunkRecord] = []
+        for c in charts:
+            lines = [
+                f"### CHART & GRAPH ANALYSIS: {c.title or 'Financial Trend Chart'}",
+                f"Page Reference: Page {c.page_number} | Source Chart ID: {c.chart_id}"
+            ]
+            if c.x_axis_label:
+                lines.append(f"- **X-Axis / Periods**: {c.x_axis_label}")
+            if c.y_axis_label:
+                lines.append(f"- **Y-Axis / Metric**: {c.y_axis_label}")
+            if c.units:
+                lines.append(f"- **Units**: {c.units}")
+            if c.legends:
+                lines.append(f"- **Legends / Categories**: {', '.join(c.legends)}")
+            if c.data_labels:
+                lines.append(f"- **Data Labels**: {', '.join(c.data_labels)}")
+            if c.extraction_limitations:
+                lines.append(f"- **Audit Notes**: {c.extraction_limitations}")
+
+            content = "\n".join(lines)
+            tokens = self.count_tokens(content)
+            chunks.append(
+                ChunkRecord(
+                    chunk_id=f"chunk_chart_{c.chart_id}",
+                    page_numbers=[c.page_number],
+                    content=content,
+                    chunk_strategy="chart_aware",
+                    section_heading=c.title or "Chart Analysis",
+                    chart_refs=[c.chart_id],
+                    image_refs=[c.image_ref] if c.image_ref else [],
+                    kpi_refs=[],
+                    table_refs=[],
+                    token_count=tokens,
+                    source_text_ids=[],
+                    experiment_tag="chart_aware"
+                )
+            )
+        return chunks
 
     def run_chunking_experiments(
         self,
@@ -289,15 +452,7 @@ class HybridChunker:
     ) -> Dict[str, Any]:
         """
         Pre-flight chunking validation and token density audit (Section 5 requirements):
-        Inspects extracted page and section content before batch Q&A generation:
-        1. Character counts
-        2. Word counts
-        3. Digit density (financial figures, tables)
-        4. Punctuation and symbol density (currencies, brackets, table pipes)
-        5. Identifies table-heavy and number-heavy pages
-        6. Estimates token counts using exact or conservative fallback method
-        7. Flags unusually dense sections likely to exceed token budget
-        Saves separate audit report to chunks/preflight_density_audit.json without overwriting experiment results.
+        Inspects extracted page and section content before batch Q&A generation.
         """
         logger.info("Running offline pre-flight chunking validation and token density audit...")
         page_audits = []
@@ -375,29 +530,91 @@ class HybridChunker:
         self,
         page_records: List[PageRecord],
         tables: List[TableRecord],
-        images: List[ImageRecord]
+        images: List[ImageRecord],
+        kpi_boxes: Optional[List[KPIBoxRecord]] = None,
+        charts: Optional[List[ChartRecord]] = None,
+        content_groups: Optional[List[ContentGroupRecord]] = None
     ) -> List[ChunkRecord]:
-        logger.info(f"Generating primary chunks (Target: {self.chunk_size} tokens, Overlap: {self.chunk_overlap})...")
-        units = self._extract_linear_units(page_records, tables)
-        
-        chunks = self._build_chunks_for_target(units, self.chunk_size, self.chunk_overlap, "primary")
+        """
+        Executes the Five Main Hybrid Chunking Strategies:
+        6.1 Heading-Based Chunking
+        6.2 Table-Aware Chunking (intact tables & oversized split)
+        6.3 Layout-Aware Chunking (independent KPI cards)
+        6.4 Chart-Aware Chunking (chart metadata & limits)
+        6.5 Token-Sentence Based Chunking (exact Qwen tokens & 50-token overlap)
+        """
+        logger.info(f"Generating 5-Strategy Hybrid Chunks (Target: {self.chunk_size} tokens, Overlap: {self.chunk_overlap})...")
+        all_chunks: List[ChunkRecord] = []
 
-        # Map images on same pages to image_refs
+        # 1. Normal Text Chunks (Heading & Sentence-based with exact tokenizer & overlap)
+        normal_tables = [t for t in tables if self.count_tokens(t.markdown_content) <= 600]
+        oversized_tables = [t for t in tables if self.count_tokens(t.markdown_content) > 600]
+
+        units = self._extract_linear_units(page_records, normal_tables)
+        text_chunks = self._build_chunks_for_target(units, self.chunk_size, self.chunk_overlap, "primary")
+        all_chunks.extend(text_chunks)
+
+        # 2. Table-Aware Chunks for Oversized Tables (split by row groups with repeated headers)
+        for tab in oversized_tables:
+            sub_chunks = self._split_oversized_table(tab, max_tokens=self.chunk_size)
+            all_chunks.extend(sub_chunks)
+
+        # 3. Layout-Aware Chunks for Independent KPI Metric Cards
+        if kpi_boxes:
+            layout_chunks = self._build_layout_chunks(kpi_boxes)
+            all_chunks.extend(layout_chunks)
+
+        # 4. Chart-Aware Chunks
+        if charts:
+            chart_chunks = self._build_chart_chunks(charts)
+            all_chunks.extend(chart_chunks)
+
+        # Map Images on corresponding pages
         img_by_page = {}
         for img in images:
             img_by_page.setdefault(img.page_number, []).append(img.image_id)
 
-        for c in chunks:
+        for c in all_chunks:
             for p in c.page_numbers:
                 if p in img_by_page:
-                    c.image_refs.extend(img_by_page[p])
+                    for i_id in img_by_page[p]:
+                        if i_id not in c.image_refs:
+                            c.image_refs.append(i_id)
 
+        # Map Content Group IDs if content groups exist
+        if content_groups:
+            for c in all_chunks:
+                for grp in content_groups:
+                    # Match by heading or overlapping page
+                    if c.section_heading and grp.topic and c.section_heading.lower() in grp.topic.lower():
+                        c.content_group_id = grp.group_id
+                        grp.chunk_ids.append(c.chunk_id)
+                        break
+                    elif any(p in grp.page_numbers for p in c.page_numbers):
+                        c.content_group_id = grp.group_id
+                        grp.chunk_ids.append(c.chunk_id)
+                        break
+
+        # Save to both chunks/chunks.jsonl and processed_data/chunks.jsonl
         out_file = self.chunks_dir / "chunks.jsonl"
-        write_jsonl(out_file, chunks)
-        logger.info(f"Primary chunks saved: {len(chunks)} chunks -> {out_file}")
+        processed_file = self.processed_dir / "chunks.jsonl"
+        write_jsonl(out_file, all_chunks)
+        write_jsonl(processed_file, all_chunks)
 
-        # Run pre-flight token density audit and 400/600/800 token experiment comparison
+        logger.info(
+            f"Hybrid Chunking Complete: {len(all_chunks)} chunks created "
+            f"(Heading: {sum(1 for c in all_chunks if c.chunk_strategy == 'heading_based')}, "
+            f"Table: {sum(1 for c in all_chunks if c.chunk_strategy == 'table_aware')}, "
+            f"Layout: {sum(1 for c in all_chunks if c.chunk_strategy == 'layout_aware')}, "
+            f"Chart: {sum(1 for c in all_chunks if c.chunk_strategy == 'chart_aware')}, "
+            f"Sentence-token: {sum(1 for c in all_chunks if c.chunk_strategy == 'token_sentence_based')})."
+        )
+
+        # Run pre-flight token density audit and experiments
         self.run_preflight_density_audit(page_records, tables)
         self.run_chunking_experiments(page_records, tables)
 
-        return chunks
+        return all_chunks
+
+    # Backward-compatible alias
+    chunk_pages = chunk_document

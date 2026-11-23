@@ -14,13 +14,14 @@ from src.config import settings
 from src.schemas import (
     TextBlockRecord, TableRecord, ImageRecord, VerifiedRecord,
     PageRecord, ChunkRecord, FactRecord, EntityIndexRecord,
-    RelatedChunkGroup, RichQARecord
+    RelatedChunkGroup, RichQARecord, ContentGroupRecord, RelationshipRecord
 )
-from src.io_utils import ensure_directory, read_jsonl, CheckpointTracker, StructuredLogger
+from src.io_utils import ensure_directory, read_jsonl, write_jsonl, CheckpointTracker, StructuredLogger
 from src.inventory_scanner import ContentInventoryScanner
 from src.pdf_extractor import PDFExtractor
 from src.quality_verifier import ExtractionQualityVerifier
 from src.image_association import ImageAssociationManager
+from src.relationship_mapper import RelationshipMapper
 from src.page_organizer import PageOrganizer
 from src.chunker import HybridChunker
 from src.vllm_engine import VLLMClient, VLLMVisionClient, get_offline_qwen_tokenizer
@@ -168,6 +169,20 @@ def main():
             tracker.mark_stage_done("page_organization")
 
         # -----------------------------------------------------------------------
+        # Task 5.5: Relationship Mapping & Content Groups (Phase 5)
+        # -----------------------------------------------------------------------
+        logger.info(">>> Task 5.5: Mapping Content Relationships & Creating Content Groups...")
+        mapper = RelationshipMapper(output_dir=output_dir)
+        relationships, content_groups = mapper.map_relationships(
+            paragraphs=getattr(extractor, "all_paragraph_records", []),
+            tables=table_records,
+            charts=getattr(extractor, "all_chart_records", []),
+            kpis=getattr(extractor, "all_kpi_records", []),
+            images=image_records
+        )
+        slogger.log_event("INFO", "relationships", f"Mapped {len(relationships)} relationships into {len(content_groups)} content groups")
+
+        # -----------------------------------------------------------------------
         # Independent Qwen Tokenizer Loading (Offline Only - ZERO Weight Loading)
         # -----------------------------------------------------------------------
         logger.info("Attempting independent offline load of exact Qwen tokenizer...")
@@ -197,7 +212,14 @@ def main():
         else:
             logger.info(">>> Task 6: Structure-Aware Chunking with SentenceTransformers Topic Boundary...")
             slogger.log_event("INFO", "chunking", "Starting hybrid chunking and 400/600/800 token experiments")
-            chunks = chunker.chunk_document(page_records, table_records, image_records)
+            chunks = chunker.chunk_document(
+                page_records,
+                table_records,
+                image_records,
+                kpi_boxes=getattr(extractor, "all_kpi_records", []),
+                charts=getattr(extractor, "all_chart_records", []),
+                content_groups=content_groups
+            )
             tracker.mark_stage_done("chunking")
             slogger.log_event("INFO", "chunking", f"Formed {len(chunks)} coherent chunks")
 
@@ -302,12 +324,14 @@ def main():
             cross_page_qa = read_jsonl(cross_page_qa_file, RichQARecord)
         else:
             logger.info(">>> Task 13: Generating Stage 5 Cross-Page Q&A (Prompt E)...")
-            cross_page_qa = qa_gen.generate_stage5_cross_page(related_groups)
+            all_cross_groups = related_groups + content_groups
+            cross_page_qa = qa_gen.generate_stage5_cross_page(all_cross_groups, chunks=chunks)
             tracker.mark_stage_done("cross_page_qa")
 
         all_generated_qa: List[RichQARecord] = direct_qa + indirect_qa + attribute_qa + combined_qa + cross_page_qa
         logger.info(f"Total raw Q&A generated across 5 perspectives: {len(all_generated_qa)}")
         slogger.log_event("INFO", "qa_generation", f"Generated total {len(all_generated_qa)} Q&A pairs")
+        write_jsonl(output_dir / "processed_data" / "generated_qa.jsonl", all_generated_qa)
 
         # -----------------------------------------------------------------------
         # Task 14: Deduplication (Exact & Normalized duplicates only; keeps semantic variety)

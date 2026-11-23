@@ -36,8 +36,10 @@ class IndependentEvaluator:
         self.output_dir = Path(output_dir)
         self.quality_dir = self.output_dir / "quality"
         self.final_dir = self.output_dir / "final"
+        self.processed_dir = self.output_dir / "processed_data"
         ensure_directory(self.quality_dir)
         ensure_directory(self.final_dir)
+        ensure_directory(self.processed_dir)
         self.llm = vllm_client
 
     def _extract_json_block(self, text: str) -> str:
@@ -203,6 +205,7 @@ class IndependentEvaluator:
         eval_results_file = self.quality_dir / "evaluation_results.jsonl"
         rejected_file = self.quality_dir / "rejected_qa.jsonl"
         approved_file = self.final_dir / "approved_qa.jsonl"
+        proc_rejected_file = self.processed_dir / "rejected_qa.jsonl"
 
         passed: List[RichQARecord] = []
         rejected: List[RichQARecord] = []
@@ -238,10 +241,26 @@ class IndependentEvaluator:
             elif eval_res.decision == "REJECT":
                 rejected.append(qa)
                 append_jsonl_record(rejected_file, qa)
+                append_jsonl_record(proc_rejected_file, qa)
             else:
                 reviewed.append(qa)
 
             pbar.set_postfix({"PASS": len(passed), "REJECT": len(rejected), "REVIEW": len(reviewed)})
+
+        # Save qa_evaluation_report.json
+        eval_report = {
+            "total_evaluated": len(qa_records),
+            "approved_pass_count": len(passed),
+            "rejected_count": len(rejected),
+            "manual_review_count": len(reviewed),
+            "pass_rate": round(len(passed) / max(1, len(qa_records)), 4),
+            "rejection_reasons_summary": [
+                {"qa_id": r.qa_id, "reason": r.evaluation_reason, "unsupported_claims": r.unsupported_claims}
+                for r in rejected[:50]
+            ]
+        }
+        with open(self.processed_dir / "qa_evaluation_report.json", "w", encoding="utf-8") as f:
+            json.dump(eval_report, f, indent=2, ensure_ascii=False)
 
         logger.info(
             f"Independent evaluation complete:\n"

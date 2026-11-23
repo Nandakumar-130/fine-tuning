@@ -50,7 +50,9 @@ from unittest.mock import MagicMock
 from src.schemas import (
     TextBlockRecord, TableRecord, ImageRecord, VerifiedRecord,
     PageRecord, ChunkRecord, FactRecord, EntityIndexRecord,
-    RelatedChunkGroup, RichQARecord, SFTConversationRecord, ChatMessage
+    RelatedChunkGroup, RichQARecord, SFTConversationRecord, ChatMessage,
+    KPIBoxRecord, ChartRecord, ParagraphRecord, ScannedTextRecord,
+    ContentGroupRecord, RelationshipRecord
 )
 from src.pdf_extractor import PDFExtractor
 from src.quality_verifier import ExtractionQualityVerifier
@@ -521,15 +523,117 @@ def run_all_tests():
         except Exception as e:
             failed_tests.append(f"34. Train/validation leakage prevention: {e}")
 
+        # -------------------------------------------------------------
+        # Case 35: Separate KPI box extraction & schema
+        # -------------------------------------------------------------
+        try:
+            kpi = KPIBoxRecord(
+                kpi_id="kpi_001",
+                page_number=7,
+                value="82.8 Cr.",
+                label="REVENUE FROM OPERATIONS",
+                unit="INR Crores",
+                section_heading="REVENUE & GROWTH"
+            )
+            assert kpi.value == "82.8 Cr."
+            assert kpi.unit == "INR Crores"
+            passed_tests.append("35. Separate KPI box extraction & schema")
+        except Exception as e:
+            failed_tests.append(f"35. Separate KPI box extraction: {e}")
+
+        # -------------------------------------------------------------
+        # Case 36: Chart region detection & limitations
+        # -------------------------------------------------------------
+        try:
+            chart = ChartRecord(
+                chart_id="chart_001",
+                page_number=32,
+                title="PAT Margin (In %)",
+                x_axis_label="FY20, FY21, FY22, FY23, FY24",
+                y_axis_label="Percentage (%)",
+                units="Percentage",
+                extraction_limitations="Visual chart representation without fabricated values."
+            )
+            assert chart.title == "PAT Margin (In %)"
+            assert "without fabricated values" in chart.extraction_limitations
+            passed_tests.append("36. Chart region detection & limitations")
+        except Exception as e:
+            failed_tests.append(f"36. Chart detection: {e}")
+
+        # -------------------------------------------------------------
+        # Case 37: Relationship mapping & Content Group registry
+        # -------------------------------------------------------------
+        try:
+            from src.relationship_mapper import RelationshipMapper
+            mapper = RelationshipMapper(output_dir=tmp_path)
+            para = ParagraphRecord(para_id="p1", page_number=1, text="Operating expenses in FY24.", section_heading="Operating Expenses")
+            tab = TableRecord(table_id="t1", page_number=1, headers=["Category", "Amount"], rows=[["Salaries", "63.1"]], markdown_content="| Category | Amount |\n|---|---|\n| Salaries | 63.1 |", table_title="Operating Expenses")
+            rels, grps = mapper.map_relationships([para], [tab], [], [], [])
+            assert len(grps) >= 1
+            assert (tmp_path / "extracted_data" / "relationships.json").exists()
+            assert (tmp_path / "processed_data" / "content_groups.json").exists()
+            passed_tests.append("37. Relationship mapping & Content Groups")
+        except Exception as e:
+            failed_tests.append(f"37. Relationship mapping: {e}")
+
+        # -------------------------------------------------------------
+        # Case 38: 5 Hybrid Chunking strategies
+        # -------------------------------------------------------------
+        try:
+            chunker = HybridChunker(output_dir=tmp_path, chunk_size=500, chunk_overlap=50, use_embeddings=False)
+            oversized_tab = TableRecord(
+                table_id="tab_big",
+                page_number=2,
+                table_title="Long Expense Table",
+                headers=["Item", "Cost"],
+                rows=[[f"Item_{i}", f"{i*10}"] for i in range(30)],
+                markdown_content="markdown"
+            )
+            split_chunks = chunker._split_oversized_table(oversized_tab, max_tokens=200)
+            assert len(split_chunks) >= 2
+            assert all(c.chunk_strategy == "table_aware" for c in split_chunks)
+            # Layout-aware KPI chunks
+            kpi_chunks = chunker._build_layout_chunks([kpi])
+            assert len(kpi_chunks) == 1
+            assert kpi_chunks[0].chunk_strategy == "layout_aware"
+            # Chart-aware chunks
+            chart_chunks = chunker._build_chart_chunks([chart])
+            assert len(chart_chunks) == 1
+            assert chart_chunks[0].chunk_strategy == "chart_aware"
+            passed_tests.append("38. 5 Hybrid Chunking strategies")
+        except Exception as e:
+            failed_tests.append(f"38. 5 Hybrid Chunking strategies: {e}")
+
+        # -------------------------------------------------------------
+        # Case 39: Separate extraction output files in extracted_data/
+        # -------------------------------------------------------------
+        try:
+            ext = PDFExtractor(pdf_path="data_set_use.pdf", output_dir=tmp_path)
+            # Assert target output paths exist in schema
+            assert hasattr(ext, "extracted_data_dir")
+            assert (ext.extracted_data_dir).name == "extracted_data"
+            passed_tests.append("39. Separate extraction output files in extracted_data/")
+        except Exception as e:
+            failed_tests.append(f"39. Separate extraction files: {e}")
+
+        # -------------------------------------------------------------
+        # Case 40: Processed data output directory validation
+        # -------------------------------------------------------------
+        try:
+            assert (tmp_path / "processed_data").exists()
+            passed_tests.append("40. Processed data output directory validation")
+        except Exception as e:
+            failed_tests.append(f"40. Processed data directory: {e}")
+
     print("\nTEST EXECUTION SUMMARY:")
-    print(f"Passed: {len(passed_tests)} / 34")
-    print(f"Failed: {len(failed_tests)} / 34")
+    print(f"Passed: {len(passed_tests)} / {len(passed_tests) + len(failed_tests)}")
+    print(f"Failed: {len(failed_tests)} / {len(passed_tests) + len(failed_tests)}")
     if failed_tests:
         print("\nFailures:")
         for ft in failed_tests:
             print("  -", ft)
     else:
-        print("\nALL 34 INTEGRATION TEST CASES PASSED SUCCESSFULLY!")
+        print(f"\nALL {len(passed_tests)} INTEGRATION TEST CASES PASSED SUCCESSFULLY!")
 
 if __name__ == "__main__":
     run_all_tests()

@@ -517,11 +517,14 @@ class SequentialPerspectiveQAGenerator:
     # -----------------------------------------------------------------------
     def generate_stage5_cross_page(
         self,
-        related_groups: List[RelatedChunkGroup]
+        related_groups: List[Any],
+        chunks: Optional[List[ChunkRecord]] = None
     ) -> List[RichQARecord]:
         stage_name = "cross_page_qa"
         out_file = self.qa_dir / "cross_page_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
+
+        chunk_dict = {c.chunk_id: c for c in chunks} if chunks else {}
 
         system_prompt = (
             "Generate multi-page Q&A only from supplied evidence. "
@@ -530,37 +533,55 @@ class SequentialPerspectiveQAGenerator:
 
         pbar = tqdm(related_groups, desc="[Live Q&A Stage 5: Cross-Page]", unit="group", file=sys.stdout)
         for group in pbar:
-            if self.tracker and self.tracker.is_chunk_done(stage_name, group.group_id):
+            group_id = getattr(group, "group_id", "GROUP_001")
+            if self.tracker and self.tracker.is_chunk_done(stage_name, group_id):
                 continue
 
+            entity_name = getattr(group, "entity_name", getattr(group, "topic", "Cross-Page Section"))
+            notes = getattr(group, "verification_notes", "; ".join(getattr(group, "relationship_reasons", [])))
+            chunk_ids = getattr(group, "chunk_ids", [])
+            page_numbers = getattr(group, "page_numbers", [])
+
+            # Construct evidence text
+            combined_evidence = getattr(group, "combined_evidence", "")
+            if not combined_evidence and chunk_dict and chunk_ids:
+                evidence_parts = []
+                for cid in chunk_ids:
+                    if cid in chunk_dict:
+                        evidence_parts.append(f"[Chunk {cid} (Page {chunk_dict[cid].page_numbers})]:\n{chunk_dict[cid].content}")
+                combined_evidence = "\n\n".join(evidence_parts)
+
+            if not combined_evidence:
+                combined_evidence = f"Evidence from cross-page group {group_id} spanning pages {page_numbers}."
+
             user_prompt = (
-                f"VERIFIED ENTITY:\n{group.entity_name} ({group.verification_notes})\n\n"
-                f"RELATED_SOURCE_CHUNKS:\n{group.combined_evidence}\n\n"
+                f"VERIFIED TOPIC/ENTITY:\n{entity_name} ({notes})\n\n"
+                f"RELATED_SOURCE_CHUNKS:\n{combined_evidence}\n\n"
                 f"TASK: Generate useful questions (up to {self.max_qa}) requiring information from at least two supplied chunks spanning different pages. "
                 "Combine evidence accurately across pages. Cite every supporting chunk ID and page. Exclude unrelated chunks.\n"
-                'Return JSON format:\n{"items":[{"question":"...","answer":"...", "source_chunk_ids":' + str(group.chunk_ids) + ', "source_pages":' + str(group.page_numbers) + ', "perspective":"cross_page"}]}'
+                'Return JSON format:\n{"items":[{"question":"...","answer":"...", "source_chunk_ids":' + str(chunk_ids) + ', "source_pages":' + str(page_numbers) + ', "perspective":"cross_page"}]}'
             )
 
             records = self._generate_with_retry_and_repair(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 perspective="cross_page",
-                fallback_chunk_id=group.group_id,
-                fallback_pages=group.page_numbers,
-                valid_chunk_ids=group.chunk_ids,
-                valid_pages=group.page_numbers
+                fallback_chunk_id=group_id,
+                fallback_pages=page_numbers,
+                valid_chunk_ids=chunk_ids,
+                valid_pages=page_numbers
             )
 
             for it in records:
                 self.global_live_counter += 1
-                it.source_chunk_ids = group.chunk_ids
-                it.source_pages = group.page_numbers
+                it.source_chunk_ids = chunk_ids
+                it.source_pages = page_numbers
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Cross-Page] {group.group_id}: \"{it.question[:70]}...\"")
+                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Cross-Page] {group_id}: \"{it.question[:70]}...\"")
 
             if self.tracker:
-                self.tracker.mark_chunk_done(stage_name, group.group_id)
+                self.tracker.mark_chunk_done(stage_name, group_id)
 
             pbar.set_postfix({"Stage5_Total": len(all_stage_records), "Live_Q&A_Count": self.global_live_counter})
 
