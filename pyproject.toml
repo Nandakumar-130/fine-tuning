@@ -3,7 +3,7 @@ name = "pdf-to-qa-pipeline"
 version = "0.1.0"
 description = "Production-grade, offline Qwen-based PDF dataset preparation and fine-tuning pipeline on Linux/CUDA"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     # 1. Core PDF & Image Processing
     "pypdf>=3.17.0",
@@ -22,7 +22,7 @@ dependencies = [
     "python-dateutil>=2.8.2",
 
     # 4. Text Structure & Embeddings
-    "spacy>=3.7.0",
+    "spacy>=3.7.0,<3.8.0",
     "sentence-transformers>=2.2.2",
 
     # 5. Configuration & Schemas

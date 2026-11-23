@@ -19,7 +19,7 @@ language-tool-python>=2.7.1
 python-dateutil>=2.8.2
 
 # 4. Text Structure & Embeddings
-spacy>=3.7.0
+spacy>=3.7.0,<3.8.0
 sentence-transformers>=2.2.2
 
 # 5. Configuration & Schemas
