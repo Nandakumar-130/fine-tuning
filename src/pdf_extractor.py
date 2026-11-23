@@ -67,6 +67,25 @@ class PDFExtractor:
                 self._paddle_ocr = False
         return self._paddle_ocr
 
+    def _get_ppstructure_engine(self):
+        if self._ppstructure_engine is None:
+            if not self.use_ppstructure:
+                return None
+            try:
+                from paddleocr import PPStructure
+                self._ppstructure_engine = PPStructure(
+                    table=True,
+                    ocr=True,
+                    show_log=False,
+                    use_gpu=self.use_gpu_ocr,
+                    lang=self.ocr_lang
+                )
+                logger.info("PP-Structure table engine initialized successfully.")
+            except Exception as e:
+                logger.warning(f"PP-Structure engine initialization fallback ({e}).")
+                self._ppstructure_engine = False
+        return self._ppstructure_engine
+
     def deskew_image(self, img_gray: np.ndarray) -> np.ndarray:
         """
         OpenCV deskewing: detect angle of text lines and rotate image straight.
@@ -175,6 +194,7 @@ class PDFExtractor:
     def extract_tables_from_page(self, page: fitz.Page, page_num: int) -> List[TableRecord]:
         """
         Table extraction preserving row label, column header, unit, currency, reporting period, footnotes.
+        Uses PyMuPDF find_tables() as primary, with PP-Structure fallback for complex tables.
         """
         tables: List[TableRecord] = []
         try:
@@ -209,7 +229,35 @@ class PDFExtractor:
                         )
                     )
         except Exception as e:
-            logger.warning(f"Table extraction on page {page_num}: {e}")
+            logger.warning(f"PyMuPDF table extraction on page {page_num}: {e}")
+
+        # PP-Structure fallback if enabled and PyMuPDF found no tables on a page with images
+        if not tables and self.use_ppstructure:
+            pps = self._get_ppstructure_engine()
+            if pps:
+                try:
+                    pix = page.get_pixmap(dpi=200)
+                    img_bytes = pix.tobytes("png")
+                    nparr = np.frombuffer(img_bytes, np.uint8)
+                    img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    pps_results = pps(img_np)
+                    for r_idx, region in enumerate(pps_results):
+                        if region.get("type", "").lower() == "table":
+                            html = region.get("res", {}).get("html", "")
+                            bbox = region.get("bbox", [0, 0, 0, 0])
+                            tables.append(
+                                TableRecord(
+                                    table_id=f"tab_pps_{page_num:03d}_{r_idx:03d}",
+                                    page_number=page_num,
+                                    headers=["PPStructure Table"],
+                                    rows=[[html]],
+                                    markdown_content=f"[PP-Structure Table Page {page_num}]:\n{html}",
+                                    bbox=[float(x) for x in bbox],
+                                    footnotes=["Extracted via PP-Structure fallback"]
+                                )
+                            )
+                except Exception as pps_err:
+                    logger.debug(f"PP-Structure extraction on page {page_num}: {pps_err}")
 
         return tables
 
@@ -249,9 +297,19 @@ class PDFExtractor:
                             )
                         )
 
-            # 2. Scanned OCR Fallback
-            if text_instances == 0:
-                logger.info(f"Page {page_num} is scanned. Rendering for OCR with OpenCV preprocessing.")
+            # 2. Scanned OCR Fallback & Mixed Page Handling
+            # Check native character count and whether page has images
+            total_native_chars = sum(len(b.text) for b in all_text_records if b.page_number == page_num)
+            image_list = page.get_images(full=True)
+
+            # Trigger OCR if page is completely scanned (0 text instances) OR
+            # mixed page (very sparse text < 80 characters while containing substantial image/drawing)
+            is_mixed_page = (text_instances > 0 and total_native_chars < 80 and len(image_list) > 0)
+            if text_instances == 0 or is_mixed_page:
+                logger.info(
+                    f"Page {page_num} detected as {'scanned' if text_instances == 0 else 'mixed native/scanned'}. "
+                    "Rendering for OCR with OpenCV preprocessing."
+                )
                 pix = page.get_pixmap(dpi=300)
                 ocr_records = self.run_ocr_on_pixmap(pix, page_num)
                 all_text_records.extend(ocr_records)
@@ -261,7 +319,6 @@ class PDFExtractor:
             all_table_records.extend(tabs)
 
             # 4. Images
-            image_list = page.get_images(full=True)
             for img_idx, img_info in enumerate(image_list):
                 xref = img_info[0]
                 base_img = doc.extract_image(xref)

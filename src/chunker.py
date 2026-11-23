@@ -47,6 +47,18 @@ class HybridChunker:
         if self.use_embeddings:
             self._init_embedder()
 
+        self._spacy_nlp = None
+        self._init_spacy()
+
+    def _init_spacy(self):
+        try:
+            import spacy
+            self._spacy_nlp = spacy.blank("en")
+            self._spacy_nlp.add_pipe("sentencizer")
+        except Exception as e:
+            logger.debug(f"spaCy sentencizer not available ({e}); using regex splitter fallback.")
+            self._spacy_nlp = None
+
     def _init_embedder(self):
         try:
             from sentence_transformers import SentenceTransformer
@@ -69,7 +81,16 @@ class HybridChunker:
         return max(1, int(len(text) / 3.5))
 
     def split_into_sentences(self, text: str) -> List[str]:
-        # Split on sentence boundaries preserving abbreviations and numbers
+        # Use spaCy sentencizer if available
+        if self._spacy_nlp:
+            try:
+                doc = self._spacy_nlp(text)
+                sents = [s.text.strip() for s in doc.sents if s.text.strip()]
+                if sents:
+                    return sents
+            except Exception:
+                pass
+        # Fallback to regex splitting on sentence boundaries preserving abbreviations and numbers
         sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z0-9])', text)
         return [s.strip() for s in sentences if s.strip()]
 

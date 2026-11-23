@@ -472,8 +472,11 @@ class SequentialPerspectiveQAGenerator:
             if self.tracker and self.tracker.is_chunk_done(stage_name, chunk.chunk_id):
                 continue
 
-            chunk_attr = attr_by_chunk.get(chunk.chunk_id, approved_attribute_qa[:10])
-            batch_summary = "\n".join([f"- Attribute Q ({q.qa_id}): {q.question} | Ans: {q.answer}" for q in chunk_attr[:10]])
+            chunk_attr = attr_by_chunk.get(chunk.chunk_id, [])
+            batch_summary = (
+                "\n".join([f"- Attribute Q ({q.qa_id}): {q.question} | Ans: {q.answer}" for q in chunk_attr[:10]])
+                if chunk_attr else "None (generate directly from original evidence facts)."
+            )
 
             user_prompt = (
                 f"ORIGINAL_SOURCE_EVIDENCE:\n{chunk.content}\n\n"

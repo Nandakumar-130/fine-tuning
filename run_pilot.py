@@ -113,7 +113,12 @@ def run_pilot(page_start: int = 1, page_end: int = 2):
     # 5. Page Organization
     logger.info(">>> Pilot Task 5: Page Organization...")
     organizer = PageOrganizer(output_dir=pilot_dir)
-    page_records = organizer.assemble_pages(text_records, table_records, image_records)
+    page_records = organizer.assemble_pages(
+        text_blocks=text_records,
+        tables=table_records,
+        images=image_records,
+        verified_records=verified_records
+    )
 
     # 6. Structure-Aware Chunking & Tokenizer
     logger.info(">>> Pilot Task 6: Tokenizer & Chunking...")

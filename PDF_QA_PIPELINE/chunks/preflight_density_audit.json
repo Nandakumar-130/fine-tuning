@@ -1,0 +1,29 @@
+{
+  "total_pages_audited": 1,
+  "total_characters": 122,
+  "total_words": 27,
+  "overall_digit_density": 0.1311,
+  "overall_symbol_density": 0.1967,
+  "exact_tokenizer_active": false,
+  "token_counting_method": "conservative_character_estimate (3.5 chars/tok)",
+  "flagged_dense_pages_count": 1,
+  "flagged_dense_pages": [
+    1
+  ],
+  "page_details": [
+    {
+      "page_number": 1,
+      "character_count": 122,
+      "word_count": 27,
+      "digit_count": 16,
+      "digit_density": 0.1311,
+      "symbol_density": 0.1967,
+      "chars_per_word": 4.52,
+      "has_tables": true,
+      "table_count": 1,
+      "estimated_tokens": 34,
+      "token_method": "conservative_character_estimate (3.5 chars/tok)",
+      "flagged_dense_financial": true
+    }
+  ]
+}

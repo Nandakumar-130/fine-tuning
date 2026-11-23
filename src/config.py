@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # PDF & Path settings
     PDF_FILE_PATH: str = Field(
-        default="PDF-to-Q&A Pipeline — Complete Qwen-Based Dataset Preparation and Fine-Tuning Guide.pdf",
+        default="data_set_use.pdf",
         description="Path to target input PDF file"
     )
     OUTPUT_DIR: str = Field(

@@ -7,7 +7,9 @@ This document provides clear, step-by-step instructions to install all dependenc
 ## Part 1: Linux / CUDA Server (Recommended for vLLM & GPU)
 
 ### 1. System Package Prerequisites (Linux)
+
 Open terminal and run:
+
 ```bash
 sudo apt-get update && sudo apt-get install -y \
     curl \
@@ -19,18 +21,22 @@ sudo apt-get update && sudo apt-get install -y \
 ```
 
 ### 2. Install `uv` Package Manager (Fastest & Recommended)
+
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 ```
 
 ### 3. Clone Repository & Install Python Packages
+
 ```bash
 git clone https://github.com/Nandakumar-130/fine-tuning.git
 cd fine-tuning
 uv sync
 ```
+
 *(Alternative using standard Python venv and pip):*
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -39,13 +45,17 @@ pip install pypdf pymupdf opencv-python-headless pillow numpy paddleocr paddlepa
 ```
 
 ### 4. Configure Environment (`.env`)
+
 Verify or adjust your `.env` settings:
+
 ```bash
 nano .env
 ```
+
 Ensure models are set to:
+
 ```ini
-PDF_FILE_PATH=L&T_AR25.pdf
+PDF_FILE_PATH=data_set_use.pdf
 OUTPUT_DIR=PDF_QA_PIPELINE
 
 VLLM_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-3B-Instruct
@@ -66,7 +76,9 @@ TRAIN_VAL_SPLIT_RATIO=0.85
 ### 5. Run the Pipeline on Linux
 
 #### A. Run Two-Page Pilot Test (Pages 1 & 2 only):
+
 Tests extraction, Qwen2.5-VL vision descriptions, text Q&A cascades, and evaluations safely in `PILOT_QA_PIPELINE/`:
+
 ```bash
 uv run python run_pilot.py
 # Or with standard venv:
@@ -74,6 +86,7 @@ python run_pilot.py
 ```
 
 #### B. Run Full Production Pipeline (All 738 Pages):
+
 ```bash
 uv run python main.py
 # Or with standard venv:
@@ -81,6 +94,7 @@ python main.py
 ```
 
 #### C. Run in Background (Survives SSH Disconnect):
+
 ```bash
 nohup uv run python main.py > pipeline_run.log 2>&1 &
 tail -f pipeline_run.log
@@ -93,12 +107,14 @@ tail -f pipeline_run.log
 > **Note:** `vLLM` is designed natively for Linux with CUDA. On Windows, the pipeline automatically detects the absence of CUDA/vLLM and switches safely to the Hugging Face Transformers CPU pipeline.
 
 ### 1. Clone Repository (PowerShell)
+
 ```powershell
 git clone https://github.com/Nandakumar-130/fine-tuning.git
 cd fine-tuning
 ```
 
 ### 2. Create Virtual Environment & Install Packages
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -109,11 +125,13 @@ pip install pypdf pymupdf opencv-python-headless pillow numpy symspellpy python-
 ### 3. Run on Windows
 
 #### A. Run Two-Page Pilot Test:
+
 ```powershell
 python run_pilot.py
 ```
 
 #### B. Run Full Pipeline:
+
 ```powershell
 python main.py
 ```
@@ -123,7 +141,9 @@ python main.py
 ## Part 3: Inspecting Output Datasets & Logs
 
 ### Check Counts of Generated Records
+
 - **On Linux:**
+
   ```bash
   # Total approved Q&A records
   wc -l PDF_QA_PIPELINE/final/approved_qa.jsonl
@@ -135,8 +155,8 @@ python main.py
   # Live event logs
   tail -n 25 PDF_QA_PIPELINE/logs/processing_logs.jsonl
   ```
-
 - **On Windows (PowerShell):**
+
   ```powershell
   # Total approved Q&A records
   (Get-Content PDF_QA_PIPELINE\final\approved_qa.jsonl).Count
@@ -154,6 +174,7 @@ python main.py
 ## Part 4: Resuming Interrupted Runs
 
 If a run is stopped or interrupted (e.g. system reboot, timeout, Ctrl+C):
+
 - State is preserved in `logs/checkpoints.json`.
 - Output records are flushed immediately to disk as they are generated.
 - Simply run the command again:
@@ -164,6 +185,7 @@ If a run is stopped or interrupted (e.g. system reboot, timeout, Ctrl+C):
   # Windows
   python main.py
   ```
+
 The pipeline automatically skips all completed stages and chunks, resuming from the exact point of interruption without duplicate processing.
 
 ---
@@ -171,6 +193,7 @@ The pipeline automatically skips all completed stages and chunks, resuming from 
 ## Part 5: Git Commands to Update and Push Changes
 
 Whenever you modify configuration, prompts, or code:
+
 ```bash
 git add .
 git commit -m "Update pipeline configuration and run parameters"

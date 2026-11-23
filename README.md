@@ -106,7 +106,7 @@ uv sync
 
 ### 3. Environment Configuration (`.env`)
 ```ini
-PDF_FILE_PATH=L&T_AR25.pdf
+PDF_FILE_PATH=data_set_use.pdf
 OUTPUT_DIR=PDF_QA_PIPELINE
 
 VLLM_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-3B-Instruct

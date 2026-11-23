@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 
 from src.schemas import PageRecord, TextBlockRecord, TableRecord, ImageRecord, VerifiedRecord
@@ -24,13 +24,41 @@ class PageOrganizer:
         self,
         text_blocks: List[TextBlockRecord],
         tables: List[TableRecord],
-        images: List[ImageRecord]
+        images: List[ImageRecord],
+        verified_records: Optional[List[VerifiedRecord]] = None
     ) -> List[PageRecord]:
         logger.info("Assembling page-level unified records...")
 
+        # If verified records provided, map verified text back into text blocks
+        verified_map = {}
+        if verified_records:
+            for vr in verified_records:
+                # Strip prefix 'ver_' to get original text_id
+                t_id = vr.record_id.replace("ver_", "")
+                verified_map[t_id] = vr
+
+        # Create updated blocks with verified text propagated
+        processed_blocks = []
+        for tb in text_blocks:
+            if tb.text_id in verified_map:
+                vr = verified_map[tb.text_id]
+                updated_tb = TextBlockRecord(
+                    text_id=tb.text_id,
+                    page_number=tb.page_number,
+                    text=vr.corrected_text,  # Propagate verified & normalized text
+                    source=tb.source,
+                    bbox=tb.bbox,
+                    reading_order_idx=tb.reading_order_idx,
+                    confidence=tb.confidence,
+                    verified=(vr.verification_status == "PASS")
+                )
+                processed_blocks.append(updated_tb)
+            else:
+                processed_blocks.append(tb)
+
         # Find total page span
         all_pages = set()
-        for t in text_blocks:
+        for t in processed_blocks:
             all_pages.add(t.page_number)
         for tab in tables:
             all_pages.add(tab.page_number)
@@ -41,7 +69,7 @@ class PageOrganizer:
         page_records: List[PageRecord] = []
 
         for p_num in sorted_pages:
-            p_texts = [t for t in text_blocks if t.page_number == p_num]
+            p_texts = [t for t in processed_blocks if t.page_number == p_num]
             # Sort by reading order
             p_texts.sort(key=lambda x: x.reading_order_idx)
 

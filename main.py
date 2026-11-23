@@ -158,8 +158,13 @@ def main():
             logger.info("Task 5 (Page Organization) already completed. Loading page records.")
             page_records = read_jsonl(page_records_file, PageRecord)
         else:
-            logger.info(">>> Task 5: Assembling Page-Level Records...")
-            page_records = organizer.assemble_pages(text_records, table_records, image_records)
+            logger.info(">>> Task 5: Assembling Page-Level Records with Verified Text Propagation...")
+            page_records = organizer.assemble_pages(
+                text_records=text_records,
+                tables=table_records,
+                images=image_records,
+                verified_records=verified_records
+            )
             tracker.mark_stage_done("page_organization")
 
         # -----------------------------------------------------------------------
