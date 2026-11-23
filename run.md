@@ -1,19 +1,12 @@
-# Execution & Run Commands Guide (Linux & Windows)
+# Execution & Run Commands Guide (Red Hat Linux)
 
-This document provides tested, production-ready commands to set up the environment, install dependencies, configure models, and run the pipeline on:
-1. **Red Hat Enterprise Linux (RHEL) / CentOS / Rocky Linux / AlmaLinux / Fedora**
-2. **Ubuntu / Debian / WSL2**
-3. **Windows 10 / 11 (PowerShell)**
+This guide provides the exact commands to set up, install dependencies, and run the PDF-to-Q&A dataset preparation pipeline on your **Red Hat Enterprise Linux (RHEL / CentOS / Rocky Linux / AlmaLinux)** server.
 
 ---
 
-## Part 1: Red Hat Enterprise Linux (RHEL / CentOS / Rocky / AlmaLinux)
+## 1. System Package Prerequisites
 
-> **Corporate / Enterprise Network Friendly:** Uses standard system tools (`dnf`/`yum`) and Python `pip` with zero external shell curl scripts.
-
-### 1. Install System Prerequisites
-
-On Red Hat systems, use `dnf` (or `yum`):
+Run these commands using Red Hat's package manager (`dnf` or `yum`):
 
 ```bash
 sudo dnf install -y \
@@ -28,55 +21,55 @@ sudo dnf install -y \
     java-11-openjdk-headless \
     python3-devel
 ```
-*(If your system uses `yum` instead of `dnf`, run `sudo yum install -y ...` with the same package list above).*
+
+*(Note: If your server uses `yum` instead of `dnf`, run: `sudo yum install -y curl git gcc gcc-c++ make mesa-libGL glib2 glib2-devel java-11-openjdk-headless python3-devel`)*
 
 ---
 
-### 2. Create Virtual Environment & Upgrade Build Tools
+## 2. Virtual Environment Setup
+
+Always create a dedicated virtual environment and upgrade the build tools first:
 
 ```bash
-# 1. Clone the repository (or pull latest changes)
-git clone https://github.com/Nandakumar-130/fine-tuning.git
-cd fine-tuning
+# 1. Pull the latest code
+git pull origin main
 
-# 2. Create the virtual environment
+# 2. Create the virtual environment (if not already created)
 python3 -m venv .venv
 
 # 3. Activate the virtual environment
 source .venv/bin/activate
 
 # 4. CRITICAL: Upgrade pip, setuptools, and wheel
-# (This ensures pre-compiled binary wheels are matched for Python 3.9)
+# (This step is required on Python 3.9 so pre-built binary wheels match properly)
 pip install --upgrade pip setuptools wheel
 ```
 
 ---
 
-### 3. Install Python Dependencies (Standard `pip`)
+## 3. Install Python Dependencies
 
-Run:
+Install all dependencies directly from PyPI using standard `pip`:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-> **Why this works seamlessly:**  
-> - Uses only standard PyPI (no blocked installer scripts).
-> - `spacy` is pinned to `>=3.7.0,<3.8.0` (`spacy 3.7.5` and `thinc 8.2.5`), ensuring 100% pre-built binary wheels for Python 3.9 without source compilation or `thinc` errors.
-
-*(Optional: If you want to use `uv`, install it via pip: `pip install uv`)*
+> **Why this works seamlessly:**
+> - Bypasses all network/proxy/firewall blocks (no `curl` shell installer needed).
+> - `spacy` is pinned to `>=3.7.0,<3.8.0`, which provides pre-compiled `manylinux` binary wheels for Python 3.9 with zero C++ compilation or `thinc` errors.
 
 ---
 
-### 4. Configure Environment (`.env`)
+## 4. Verify Configuration (`.env`)
 
-Check your configuration:
+Check your `.env` configuration file:
 
 ```bash
-nano .env
+cat .env
 ```
 
-Ensure parameters match your server hardware:
+Ensure the key settings match:
 
 ```ini
 PDF_FILE_PATH=data_set_use.pdf
@@ -86,7 +79,7 @@ VLLM_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-3B-Instruct
 VLLM_VL_MODEL_NAME_OR_PATH=Qwen/Qwen2.5-VL-3B-Instruct
 EMBEDDING_MODEL_NAME_OR_PATH=BAAI/bge-small-en-v1.5
 
-# Set USE_VLLM=True if CUDA GPU is available; False for CPU
+# Set to True if NVIDIA CUDA GPU is available; False if CPU only
 USE_VLLM=True
 VLLM_GPU_MEMORY_UTILIZATION=0.85
 VLLM_MAX_MODEL_LEN=4096
@@ -100,107 +93,76 @@ TRAIN_VAL_SPLIT_RATIO=0.85
 
 ---
 
-### 5. Run the Pipeline on Linux
+## 5. Execution Commands
 
-#### A. Run Pilot Run (Sample Pages 7–8):
+Make sure your virtual environment is active before running any command:
+```bash
+source .venv/bin/activate
+```
+
+### A. Run Two-Page Pilot Test (Safe Verification on Pages 7–8)
+Verifies text, KPI cards, charts, 5 chunking strategies, Q&A cascades, and SFT format export:
+
 ```bash
 python run_pilot.py --start-page 7 --end-page 8 --output-dir pilot_sample
 ```
 
-#### B. Run 40-Case Integration Test Suite:
+### B. Run the 40-Case Integration Test Suite
+Verifies all modules, schemas, Qwen-as-a-Judge evaluation, and file outputs:
+
 ```bash
 python test_34_integration.py
 ```
 
-#### C. Run Full Pipeline:
+### C. Run the Full Production Pipeline
+Processes the entire document with automatic checkpoint saving and recovery:
+
 ```bash
 python main.py
 ```
 
-#### D. Run in Background (Survives Terminal Close / SSH Disconnect):
+### D. Run Full Pipeline in Background (Survives SSH Disconnect)
+To let the pipeline run in the background if your terminal closes:
+
 ```bash
 nohup python main.py > pipeline_run.log 2>&1 &
+```
+
+To monitor live progress:
+```bash
 tail -f pipeline_run.log
 ```
 
 ---
 
-## Part 2: Ubuntu / Debian / WSL2
+## 6. Inspecting Generated Outputs
+
+After running the pilot or full pipeline, check the outputs:
 
 ```bash
-# 1. System packages
-sudo apt-get update && sudo apt-get install -y curl git build-essential libgl1-mesa-glx libglib2.0-0 default-jre python3-dev
-
-# 2. Virtual environment & packages
-cd fine-tuning
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
-
-# 3. Run pilot or full pipeline
-python run_pilot.py --start-page 7 --end-page 8 --output-dir pilot_sample
-python main.py
-```
-
----
-
-## Part 3: Windows 10 / 11 (PowerShell)
-
-```powershell
-# 1. Clone & enter repository
-git clone https://github.com/Nandakumar-130/fine-tuning.git
-cd fine-tuning
-
-# 2. Virtual environment & packages
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
-
-# 3. Run pilot test or integration test
-python run_pilot.py --start-page 7 --end-page 8 --output-dir pilot_sample
-python test_34_integration.py
-
-# 4. Run full pipeline
-python main.py
-```
-
----
-
-## Part 4: Inspecting Generated Datasets & Outputs
-
-### On Linux:
-```bash
-# Extracted multimodal components
+# 1. Extracted Multimodal Data (paragraphs, tables, charts, KPI boxes, images, relationships)
 ls -lh pilot_sample/extracted_data/
 
-# Processed chunks & SFT datasets
+# 2. Processed Chunks & ChatML SFT Datasets
 ls -lh pilot_sample/processed_data/
 
-# Check line counts of final datasets
+# 3. View record counts in final datasets
 wc -l pilot_sample/final/approved_qa.jsonl
 wc -l pilot_sample/final/train.jsonl
 wc -l pilot_sample/final/validation.jsonl
 
-# View Quality Audit Summary
+# 4. View the Quality Audit Report
 cat pilot_sample/quality/quality_audit_report.json
-```
-
-### On Windows (PowerShell):
-```powershell
-Get-ChildItem pilot_sample\processed_data, pilot_sample\extracted_data
-(Get-Content pilot_sample\final\approved_qa.jsonl).Count
 ```
 
 ---
 
-## Part 5: Troubleshooting Guide
+## 7. Troubleshooting Quick Reference
 
 | Issue | Cause | Fix |
 | :--- | :--- | :--- |
-| `sudo: apt-get: command not found` | Red Hat/CentOS uses `dnf` or `yum`. | Use `sudo dnf install -y ...` (or `yum`). |
-| `curl: (22) 403 Forbidden` on astral.sh | Corporate network blocks installer script. | Use standard `pip install -r requirements.txt` (or `pip install uv`). |
-| `bash: ~/.local/bin/env: No such file` | Failed curl script never created the file. | Activate `.venv` directly with `source .venv/bin/activate`. |
-| `Failed to build spacy` / `thinc<8.4.0` | Python 3.9 on unpinned `spacy 3.8+`. | Run `pip install -U pip setuptools wheel` then `pip install -r requirements.txt`. |
-| Process killed upon SSH disconnect | Foreground process terminated. | Run with `nohup python main.py > pipeline_run.log 2>&1 &`. |
+| `sudo: apt-get: command not found` | Red Hat uses `dnf` or `yum`. | Use `sudo dnf install -y ...` (or `yum`). |
+| `curl: (22) error: 403` on astral.sh | Firewall/proxy blocked the script. | Do not use curl; use standard `pip install -r requirements.txt`. |
+| `bash: ~/.local/bin/env: No such file` | The curl script never ran. | Activate the venv directly with `source .venv/bin/activate`. |
+| `Failed to build spacy` / `thinc` | Python 3.9 on unpinned `spacy`. | Run `pip install -U pip setuptools wheel` then `pip install -r requirements.txt`. |
+| Terminal closes during long run | SSH session timed out. | Run with `nohup python main.py > pipeline_run.log 2>&1 &`. |
