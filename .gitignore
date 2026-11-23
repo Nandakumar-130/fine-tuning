@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Output folders
+output/
+PILOT_QA_PIPELINE/
+pilot_sample/
+*.log

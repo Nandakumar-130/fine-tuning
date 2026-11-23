@@ -22,12 +22,16 @@ class PageOrganizer:
 
     def assemble_pages(
         self,
-        text_blocks: List[TextBlockRecord],
-        tables: List[TableRecord],
-        images: List[ImageRecord],
-        verified_records: Optional[List[VerifiedRecord]] = None
+        text_blocks: Optional[List[TextBlockRecord]] = None,
+        tables: Optional[List[TableRecord]] = None,
+        images: Optional[List[ImageRecord]] = None,
+        verified_records: Optional[List[VerifiedRecord]] = None,
+        text_records: Optional[List[TextBlockRecord]] = None
     ) -> List[PageRecord]:
         logger.info("Assembling page-level unified records...")
+        blocks_to_use = text_blocks if text_blocks is not None else (text_records or [])
+        tables = tables or []
+        images = images or []
 
         # If verified records provided, map verified text back into text blocks
         verified_map = {}
@@ -39,7 +43,7 @@ class PageOrganizer:
 
         # Create updated blocks with verified text propagated
         processed_blocks = []
-        for tb in text_blocks:
+        for tb in blocks_to_use:
             if tb.text_id in verified_map:
                 vr = verified_map[tb.text_id]
                 updated_tb = TextBlockRecord(

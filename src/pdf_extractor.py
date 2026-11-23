@@ -459,7 +459,7 @@ class PDFExtractor:
 
         return charts
 
-    def extract_all(self) -> Tuple[List[TextBlockRecord], List[ImageRecord], List[TableRecord]]:
+    def extract_all(self, page_range: Optional[Tuple[int, int]] = None) -> Tuple[List[TextBlockRecord], List[ImageRecord], List[TableRecord]]:
         if not self.pdf_path.exists():
             raise FileNotFoundError(f"PDF file not found at: {self.pdf_path}")
 
@@ -472,9 +472,17 @@ class PDFExtractor:
         all_kpi_records: List[KPIBoxRecord] = []
         all_chart_records: List[ChartRecord] = []
 
-        logger.info(f"Extracting PDF: {self.pdf_path.name} ({len(doc)} pages)")
+        start_idx = 0
+        end_idx = len(doc)
+        if page_range:
+            start_idx = max(0, page_range[0] - 1)
+            end_idx = min(len(doc), page_range[1])
 
-        for page_idx in range(len(doc)):
+        total_doc_pages = len(doc)
+        pages_processed = end_idx - start_idx
+        logger.info(f"Extracting PDF: {self.pdf_path.name} (pages {start_idx + 1} to {end_idx} of {total_doc_pages})")
+
+        for page_idx in range(start_idx, end_idx):
             page_num = page_idx + 1
             page = doc[page_idx]
 
@@ -606,7 +614,7 @@ class PDFExtractor:
 
         all_data = {
             "document_id": self.pdf_path.stem,
-            "total_pages": len(doc),
+            "total_pages": total_doc_pages,
             "paragraphs": [p.model_dump() for p in all_paragraph_records],
             "tables": [t.model_dump() for t in all_table_records],
             "charts": [c.model_dump() for c in all_chart_records],
@@ -619,7 +627,8 @@ class PDFExtractor:
 
         report = {
             "document_name": self.pdf_path.name,
-            "total_pages_processed": len(doc),
+            "total_pages_in_document": total_doc_pages,
+            "total_pages_processed": pages_processed,
             "total_paragraphs": len(all_paragraph_records),
             "total_scanned_text_records": len(all_scanned_records),
             "total_tables": len(all_table_records),

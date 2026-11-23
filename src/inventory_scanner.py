@@ -1,6 +1,6 @@
 import fitz  # PyMuPDF
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 import logging
 from src.io_utils import ensure_directory, write_jsonl
 
@@ -23,17 +23,23 @@ class ContentInventoryScanner:
         self.original_dir = self.output_dir / "original"
         ensure_directory(self.original_dir)
 
-    def scan_inventory(self) -> List[Dict[str, Any]]:
+    def scan_inventory(self, page_range: Optional[Tuple[int, int]] = None) -> List[Dict[str, Any]]:
         logger.info(f"Inventorying content types for: {self.pdf_path.name}")
         doc = fitz.open(self.pdf_path)
         inventory: List[Dict[str, Any]] = []
 
         total_pages = len(doc)
+        start_idx = 0
+        end_idx = total_pages
+        if page_range:
+            start_idx = max(0, page_range[0] - 1)
+            end_idx = min(total_pages, page_range[1])
+
         total_text_blocks = 0
         total_images = 0
         total_tables = 0
 
-        for page_idx in range(total_pages):
+        for page_idx in range(start_idx, end_idx):
             page_num = page_idx + 1
             page = doc[page_idx]
 
@@ -88,3 +94,6 @@ class ContentInventoryScanner:
             f"Saved to: {out_file}"
         )
         return inventory
+
+    # Alias for method name consistency
+    scan_document = scan_inventory

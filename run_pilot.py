@@ -9,6 +9,7 @@ import os
 import sys
 import logging
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -50,8 +51,8 @@ def setup_pilot_logger(output_dir: Path):
         ]
     )
 
-def run_pilot(page_start: int = 1, page_end: int = 2):
-    pilot_dir = ROOT_DIR / "PILOT_QA_PIPELINE"
+def run_pilot(page_start: int = 1, page_end: int = 2, output_dir: Optional[str] = None):
+    pilot_dir = Path(output_dir) if output_dir else ROOT_DIR / "PILOT_QA_PIPELINE"
     ensure_directory(pilot_dir)
     setup_pilot_logger(pilot_dir)
     logger = logging.getLogger("PilotRunner")
@@ -73,14 +74,14 @@ def run_pilot(page_start: int = 1, page_end: int = 2):
     # 1. Content Inventory Scanner
     logger.info(">>> Pilot Task 1: Inventory Scan...")
     scanner = ContentInventoryScanner(pdf_path, output_dir=pilot_dir)
-    inventory = scanner.scan_document()
+    inventory = scanner.scan_document(page_range=(page_start, page_end))
 
     # 2. PDF Extraction (Filtered to pilot pages)
     logger.info(f">>> Pilot Task 2: Extracting Native Text, Tables, and Images from pages {page_start}-{page_end}...")
     extractor = PDFExtractor(pdf_path, output_dir=pilot_dir)
     
     # Extract only pilot pages
-    raw_text, tables, images = extractor.extract_all()
+    raw_text, images, tables = extractor.extract_all(page_range=(page_start, page_end))
     text_records = [t for t in raw_text if page_start <= t.page_number <= page_end]
     table_records = [tb for tb in tables if page_start <= tb.page_number <= page_end]
     image_records = [im for im in images if page_start <= im.page_number <= page_end]
@@ -140,7 +141,8 @@ def run_pilot(page_start: int = 1, page_end: int = 2):
         chunk_size=settings.CHUNK_SIZE,
         chunk_overlap=settings.CHUNK_OVERLAP,
         tokenizer=exact_qwen_tokenizer,
-        embedding_model_name=settings.EMBEDDING_MODEL_NAME_OR_PATH
+        embedding_model_name=settings.EMBEDDING_MODEL_NAME_OR_PATH,
+        use_embeddings=False
     )
     chunks = chunker.chunk_document(
         page_records,
@@ -215,4 +217,11 @@ def run_pilot(page_start: int = 1, page_end: int = 2):
     logger.info(f"Validation conversations: {len(val_sft)} -> {pilot_dir / 'final' / 'validation.jsonl'}")
 
 if __name__ == "__main__":
-    run_pilot(page_start=1, page_end=2)
+    import argparse
+    parser = argparse.ArgumentParser(description="Pilot PDF-to-Q&A Pipeline Run")
+    parser.add_argument("--start-page", type=int, default=1, help="Start page number (1-indexed)")
+    parser.add_argument("--end-page", type=int, default=2, help="End page number (1-indexed)")
+    parser.add_argument("--output-dir", type=str, default="PILOT_QA_PIPELINE", help="Pilot output directory")
+    args = parser.parse_args()
+
+    run_pilot(page_start=args.start_page, page_end=args.end_page, output_dir=args.output_dir)

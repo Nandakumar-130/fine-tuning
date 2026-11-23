@@ -9,7 +9,7 @@ from tqdm import tqdm
 from src.schemas import (
     ChunkRecord, FactRecord, RelatedChunkGroup, RichQARecord, QAResponseSchema, QAPairItem
 )
-from src.io_utils import ensure_directory, append_jsonl_record, CheckpointTracker, StructuredLogger
+from src.io_utils import ensure_directory, append_jsonl_record, read_jsonl, CheckpointTracker, StructuredLogger
 from src.vllm_engine import VLLMClient
 
 logger = logging.getLogger("QAGenerator")
@@ -264,6 +264,8 @@ class SequentialPerspectiveQAGenerator:
         stage_name = "direct_qa"
         out_file = self.qa_dir / "direct_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
+        if out_file.exists():
+            all_stage_records = read_jsonl(out_file, RichQARecord)
 
         system_prompt = (
             "You create evidence-grounded Q&A. Use only supplied evidence. "
@@ -322,6 +324,8 @@ class SequentialPerspectiveQAGenerator:
         stage_name = "indirect_qa"
         out_file = self.qa_dir / "indirect_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
+        if out_file.exists():
+            all_stage_records = read_jsonl(out_file, RichQARecord)
 
         chunk_dict = {c.chunk_id: c for c in chunks}
 
@@ -390,6 +394,8 @@ class SequentialPerspectiveQAGenerator:
         stage_name = "attribute_qa"
         out_file = self.qa_dir / "attribute_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
+        if out_file.exists():
+            all_stage_records = read_jsonl(out_file, RichQARecord)
 
         chunk_dict = {c.chunk_id: c for c in chunks}
 
@@ -457,6 +463,8 @@ class SequentialPerspectiveQAGenerator:
         stage_name = "combined_qa"
         out_file = self.qa_dir / "combined_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
+        if out_file.exists():
+            all_stage_records = read_jsonl(out_file, RichQARecord)
 
         attr_by_chunk: Dict[str, List[RichQARecord]] = {}
         for att in approved_attribute_qa:
@@ -523,6 +531,8 @@ class SequentialPerspectiveQAGenerator:
         stage_name = "cross_page_qa"
         out_file = self.qa_dir / "cross_page_qa.jsonl"
         all_stage_records: List[RichQARecord] = []
+        if out_file.exists():
+            all_stage_records = read_jsonl(out_file, RichQARecord)
 
         chunk_dict = {c.chunk_id: c for c in chunks} if chunks else {}
 

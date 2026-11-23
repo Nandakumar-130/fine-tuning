@@ -104,3 +104,5 @@ class QualityAuditor:
 
         logger.info(f"Quality audit report successfully saved to: {report_file}")
         return report
+
+    generate_quality_report = generate_report
