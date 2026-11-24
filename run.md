@@ -193,17 +193,62 @@ Verify if model weights are fully downloaded or just empty metadata directories:
 du -sh ~/.cache/huggingface/hub/models--*
 ```
 
-### C. Verify Python Packages in 3 Seconds
-Check if all required pipeline packages are properly installed in your active environment:
+### C. Complete Check: What Packages Are Installed vs Not Installed
+Run this command to check every single package listed in `requirements.txt` and report exactly which ones are **INSTALLED** and which ones are **NOT INSTALLED**:
+
 ```bash
 python -c "
-mods = ['fitz', 'cv2', 'PIL', 'paddleocr', 'pydantic', 'torch', 'vllm', 'transformers', 'tqdm', 'sentence_transformers']
-for m in mods:
+import importlib
+
+packages = [
+    ('PyMuPDF (fitz)', 'fitz'),
+    ('pypdf', 'pypdf'),
+    ('opencv-python', 'cv2'),
+    ('Pillow', 'PIL'),
+    ('numpy', 'numpy'),
+    ('paddleocr', 'paddleocr'),
+    ('paddlepaddle', 'paddle'),
+    ('symspellpy', 'symspellpy'),
+    ('language-tool-python', 'language_tool_python'),
+    ('python-dateutil', 'dateutil'),
+    ('spacy', 'spacy'),
+    ('sentence-transformers', 'sentence_transformers'),
+    ('pydantic', 'pydantic'),
+    ('pydantic-settings', 'pydantic_settings'),
+    ('python-dotenv', 'dotenv'),
+    ('vllm', 'vllm'),
+    ('transformers', 'transformers'),
+    ('accelerate', 'accelerate'),
+    ('torch', 'torch'),
+    ('tqdm', 'tqdm')
+]
+
+installed = []
+not_installed = []
+
+for name, mod in packages:
     try:
-        __import__(m)
-        print(f'  [OK] {m}')
+        m = importlib.import_module(mod)
+        version = getattr(m, '__version__', 'installed')
+        installed.append((name, version))
     except ImportError:
-        print(f'  [MISSING] {m}')
+        not_installed.append(name)
+
+print('=' * 50)
+print(' INSTALLED PACKAGES:')
+print('=' * 50)
+for name, ver in installed:
+    print(f'  [✓] {name:<25} (version: {ver})')
+
+print('\n' + '=' * 50)
+print(' NOT INSTALLED / MISSING PACKAGES:')
+print('=' * 50)
+if not not_installed:
+    print('  All packages are successfully installed!')
+else:
+    for name in not_installed:
+        print(f'  [✗] {name}')
+print('=' * 50)
 "
 ```
 
