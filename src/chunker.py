@@ -198,6 +198,8 @@ class HybridChunker:
                 chunks.append(chunk_rec)
                 chunk_idx += 1
 
+                chunk_start = curr_indices[0]
+
                 # Calculate overlap
                 overlap_accum = 0
                 backtrack_pos = i
@@ -206,6 +208,10 @@ class HybridChunker:
                     if overlap_accum >= target_overlap:
                         backtrack_pos = j
                         break
+
+                # Ensure strict forward progress to prevent infinite loop
+                if backtrack_pos <= chunk_start:
+                    backtrack_pos = chunk_start + 1
 
                 curr_indices = []
                 curr_tokens = 0
