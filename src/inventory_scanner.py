@@ -1,3 +1,4 @@
+from __future__ import annotations
 import fitz  # PyMuPDF
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
