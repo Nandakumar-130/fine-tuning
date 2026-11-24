@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 Two-Page Pilot Pipeline Execution Script
 Executes the identical extraction, chunking, Qwen2.5-VL-3B-Instruct (vision),

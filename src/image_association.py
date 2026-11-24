@@ -1,7 +1,6 @@
-from __future__ import annotations
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Union, List, Dict, Any, Optional
 import logging
 
 from src.schemas import ImageRecord, TextBlockRecord
@@ -19,7 +18,7 @@ class ImageAssociationManager:
     - Keep uncertain images separate rather than forcing a false relationship.
     - Store: image_id, path, page_number, description, caption, related_text_ids, association_status.
     """
-    def __init__(self, output_dir: str | Path):
+    def __init__(self, output_dir: Union[str, Path]):
         self.output_dir = Path(output_dir)
         self.extracted_dir = self.output_dir / "extracted"
 

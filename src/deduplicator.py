@@ -1,7 +1,6 @@
-from __future__ import annotations
 import re
 import unicodedata
-from typing import List, Tuple, Set, Dict, Any
+from typing import Union, List, Tuple, Set, Dict, Any
 from pathlib import Path
 import logging
 
@@ -27,7 +26,7 @@ class QADeduplicator:
     - Do not remove an example merely because its answer matches another answer.
     - Save duplicates log to quality/exact_duplicates.jsonl.
     """
-    def __init__(self, output_dir: str | Path):
+    def __init__(self, output_dir: Union[str, Path]):
         self.output_dir = Path(output_dir)
         self.quality_dir = self.output_dir / "quality"
         ensure_directory(self.quality_dir)

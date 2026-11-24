@@ -1,4 +1,3 @@
-from __future__ import annotations
 """
 Master 34-Case Comprehensive Integration Test Suite
 Validates the complete PDF-to-Q&A dataset preparation pipeline:

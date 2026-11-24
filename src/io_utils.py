@@ -1,20 +1,19 @@
-from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Generator, Optional, Type, TypeVar
+from typing import Union, List, Dict, Any, Generator, Optional, Type, TypeVar
 from pydantic import BaseModel
 
 T = TypeVar("T", bound=BaseModel)
 logger = logging.getLogger("PipelineIO")
 
-def ensure_directory(path: Path | str) -> Path:
+def ensure_directory(path: Union[Path, str]) -> Path:
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-def write_jsonl(file_path: Path | str, records: List[BaseModel | Dict[str, Any]], append: bool = False) -> None:
+def write_jsonl(file_path: Union[Path, str], records: List[Union[BaseModel, Dict[str, Any]]], append: bool = False) -> None:
     path = Path(file_path)
     ensure_directory(path.parent)
     mode = "a" if append else "w"
@@ -26,7 +25,7 @@ def write_jsonl(file_path: Path | str, records: List[BaseModel | Dict[str, Any]]
                 line = json.dumps(record, ensure_ascii=False)
             f.write(line + "\n")
 
-def append_jsonl_record(file_path: Path | str, record: BaseModel | Dict[str, Any]) -> None:
+def append_jsonl_record(file_path: Union[Path, str], record: Union[BaseModel, Dict[str, Any]]) -> None:
     path = Path(file_path)
     ensure_directory(path.parent)
     with open(path, "a", encoding="utf-8") as f:
@@ -37,7 +36,7 @@ def append_jsonl_record(file_path: Path | str, record: BaseModel | Dict[str, Any
         f.write(line + "\n")
         f.flush()  # Immediate write for live persistence
 
-def read_jsonl(file_path: Path | str, model_cls: Optional[Type[T]] = None) -> List[Any]:
+def read_jsonl(file_path: Union[Path, str], model_cls: Optional[Type[T]] = None) -> List[Any]:
     path = Path(file_path)
     if not path.exists():
         return []
@@ -57,7 +56,7 @@ def read_jsonl(file_path: Path | str, model_cls: Optional[Type[T]] = None) -> Li
                 logger.error(f"Error parsing line {line_num} in {file_path}: {e}")
     return records
 
-def stream_jsonl(file_path: Path | str) -> Generator[Dict[str, Any], None, None]:
+def stream_jsonl(file_path: Union[Path, str]) -> Generator[Dict[str, Any], None, None]:
     path = Path(file_path)
     if not path.exists():
         return
@@ -75,7 +74,7 @@ class StructuredLogger:
     Page 9 of PDF: logs/processing_logs.jsonl
     Logs every stage start, chunk completion, warning, and error with timestamps.
     """
-    def __init__(self, log_dir: Path | str):
+    def __init__(self, log_dir: Union[Path, str]):
         self.log_dir = Path(log_dir)
         ensure_directory(self.log_dir)
         self.log_file = self.log_dir / "processing_logs.jsonl"
@@ -95,7 +94,7 @@ class CheckpointTracker:
     Page 9 of PDF: logs/checkpoints.json
     Tracks completed stages and individual chunk IDs per stage.
     """
-    def __init__(self, checkpoint_file: Path | str):
+    def __init__(self, checkpoint_file: Union[Path, str]):
         self.checkpoint_file = Path(checkpoint_file)
         ensure_directory(self.checkpoint_file.parent)
         self.state: Dict[str, Any] = self._load()

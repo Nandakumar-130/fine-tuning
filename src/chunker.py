@@ -1,9 +1,8 @@
-from __future__ import annotations
 import re
 import json
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Union, List, Dict, Any, Optional
 import logging
 
 from src.schemas import (
@@ -30,7 +29,7 @@ class HybridChunker:
     """
     def __init__(
         self,
-        output_dir: str | Path,
+        output_dir: Union[str, Path],
         chunk_size: int = 500,
         chunk_overlap: int = 50,
         tokenizer: Optional[Any] = None,
@@ -67,11 +66,18 @@ class HybridChunker:
 
     def _init_embedder(self):
         try:
+            import os
+            # Prevent hangs or external network calls if offline
             from sentence_transformers import SentenceTransformer
-            logger.info(f"Loading SentenceTransformers for topic shift detection: {self.embedding_model_name}")
-            self._embedder = SentenceTransformer(self.embedding_model_name)
+            logger.info(f"Attempting to load SentenceTransformers model from local cache: {self.embedding_model_name}")
+            self._embedder = SentenceTransformer(self.embedding_model_name, local_files_only=True)
+            logger.info("SentenceTransformers model loaded successfully from local cache.")
         except Exception as e:
-            logger.warning(f"SentenceTransformers fallback (heuristic topic boundary will be used): {e}")
+            logger.warning(
+                f"SentenceTransformers offline notice: Local cache not available ({e}). "
+                "Pipeline is continuing using structure-aware heuristic topic boundary detection. "
+                "No external network download will be attempted."
+            )
             self._embedder = None
 
     def count_tokens(self, text: str) -> int:

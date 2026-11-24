@@ -1,10 +1,9 @@
-from __future__ import annotations
 import json
 import re
 import sys
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import Union, List, Dict, Any, Tuple
 from tqdm import tqdm
 
 from src.schemas import RichQARecord, EvaluationResult, ChunkRecord
@@ -33,7 +32,7 @@ class IndependentEvaluator:
         the exact rejection reason and unsupported claims back to Qwen to regenerate a corrected,
         fully grounded Q&A pair. If it passes upon re-verification, it is saved; otherwise rejected.
     """
-    def __init__(self, output_dir: str | Path, vllm_client: VLLMClient):
+    def __init__(self, output_dir: Union[str, Path], vllm_client: VLLMClient):
         self.output_dir = Path(output_dir)
         self.quality_dir = self.output_dir / "quality"
         self.final_dir = self.output_dir / "final"

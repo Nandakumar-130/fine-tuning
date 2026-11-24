@@ -1,7 +1,6 @@
-from __future__ import annotations
 import fitz  # PyMuPDF
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Union, Dict, Any, List, Optional, Tuple
 import logging
 from src.io_utils import ensure_directory, write_jsonl
 
@@ -18,7 +17,7 @@ class ContentInventoryScanner:
     - Tables / structured grids
     - Page dimensions & rotation
     """
-    def __init__(self, pdf_path: str | Path, output_dir: str | Path):
+    def __init__(self, pdf_path: Union[str, Path], output_dir: Union[str, Path]):
         self.pdf_path = Path(pdf_path)
         self.output_dir = Path(output_dir)
         self.original_dir = self.output_dir / "original"

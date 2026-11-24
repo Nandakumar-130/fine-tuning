@@ -1,4 +1,3 @@
-from __future__ import annotations
 import os
 import re
 import cv2
@@ -6,7 +5,7 @@ import json
 import fitz  # PyMuPDF
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Any
+from typing import Union, List, Dict, Tuple, Optional, Any
 import logging
 
 from src.schemas import (
@@ -33,8 +32,8 @@ class PDFExtractor:
     """
     def __init__(
         self,
-        pdf_path: str | Path,
-        output_dir: str | Path,
+        pdf_path: Union[str, Path],
+        output_dir: Union[str, Path],
         ocr_lang: str = "en",
         use_gpu_ocr: bool = False,
         use_ppstructure: bool = False

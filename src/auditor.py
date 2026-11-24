@@ -1,8 +1,7 @@
-from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Union, Dict, Any, List
 
 from src.io_utils import ensure_directory, read_jsonl
 
@@ -22,7 +21,7 @@ class QualityAuditor:
     - Q&A with valid source chunk and page references.
     - Approved examples and train/validation counts.
     """
-    def __init__(self, output_dir: str | Path):
+    def __init__(self, output_dir: Union[str, Path]):
         self.output_dir = Path(output_dir)
         self.quality_dir = self.output_dir / "quality"
         self.logs_dir = self.output_dir / "logs"

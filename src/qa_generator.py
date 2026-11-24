@@ -302,7 +302,9 @@ class SequentialPerspectiveQAGenerator:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Direct] {chunk.chunk_id}: \"{it.question[:70]}...\"")
+                tqdm.write(f"  [Q&A #{self.global_live_counter:04d}] [Direct] Chunk: {chunk.chunk_id} (Page {chunk.page_numbers}) -> \"{it.question[:70]}...\"")
+
+            tqdm.write(f"  ✓ {chunk.chunk_id}: Generated {len(records)} Direct Q&A | Stage 1 Total: {len(all_stage_records)}")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, chunk.chunk_id)
@@ -374,7 +376,9 @@ class SequentialPerspectiveQAGenerator:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Indirect from {direct_item.qa_id}]: \"{it.question[:70]}...\"")
+                tqdm.write(f"  [Q&A #{self.global_live_counter:04d}] [Indirect from {direct_item.qa_id}] Chunk: {primary_chunk_id} -> \"{it.question[:70]}...\"")
+
+            tqdm.write(f"  ✓ {direct_item.qa_id}: Generated {len(records)} Indirect Q&A | Stage 2 Total: {len(all_stage_records)}")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, item_checkpoint_key)
@@ -443,7 +447,9 @@ class SequentialPerspectiveQAGenerator:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Attribute from {indirect_item.qa_id}]: \"{it.question[:70]}...\"")
+                tqdm.write(f"  [Q&A #{self.global_live_counter:04d}] [Attribute from {indirect_item.qa_id}] Chunk: {primary_chunk_id} -> \"{it.question[:70]}...\"")
+
+            tqdm.write(f"  ✓ {indirect_item.qa_id}: Generated {len(records)} Attribute Q&A | Stage 3 Total: {len(all_stage_records)}")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, item_checkpoint_key)
@@ -511,7 +517,9 @@ class SequentialPerspectiveQAGenerator:
                 self.global_live_counter += 1
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Combined] {chunk.chunk_id}: \"{it.question[:70]}...\"")
+                tqdm.write(f"  [Q&A #{self.global_live_counter:04d}] [Combined] Chunk: {chunk.chunk_id} (Page {chunk.page_numbers}) -> \"{it.question[:70]}...\"")
+
+            tqdm.write(f"  ✓ {chunk.chunk_id}: Generated {len(records)} Combined Q&A | Stage 4 Total: {len(all_stage_records)}")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, chunk.chunk_id)
@@ -589,7 +597,9 @@ class SequentialPerspectiveQAGenerator:
                 it.source_pages = page_numbers
                 append_jsonl_record(out_file, it)
                 all_stage_records.append(it)
-                tqdm.write(f"  [LIVE Q&A #{self.global_live_counter:04d}] [Cross-Page] {group_id}: \"{it.question[:70]}...\"")
+                tqdm.write(f"  [Q&A #{self.global_live_counter:04d}] [Cross-Page] Group: {group_id} (Chunks: {chunk_ids}) -> \"{it.question[:70]}...\"")
+
+            tqdm.write(f"  ✓ {group_id}: Generated {len(records)} Cross-Page Q&A | Stage 5 Total: {len(all_stage_records)}")
 
             if self.tracker:
                 self.tracker.mark_chunk_done(stage_name, group_id)

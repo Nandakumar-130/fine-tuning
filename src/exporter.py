@@ -1,8 +1,7 @@
-from __future__ import annotations
 import random
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import Union, List, Dict, Any, Tuple
 
 from src.schemas import RichQARecord, SFTConversationRecord, ChatMessage
 from src.io_utils import ensure_directory, write_jsonl
@@ -23,7 +22,7 @@ class FineTuningExporter:
       final/train.jsonl
       final/validation.jsonl
     """
-    def __init__(self, output_dir: str | Path, train_ratio: float = 0.85):
+    def __init__(self, output_dir: Union[str, Path], train_ratio: float = 0.85):
         self.output_dir = Path(output_dir)
         self.final_dir = self.output_dir / "final"
         self.processed_dir = self.output_dir / "processed_data"

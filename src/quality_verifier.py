@@ -1,8 +1,7 @@
-from __future__ import annotations
 import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
-from typing import List, Tuple, Dict, Any, Optional
+from typing import Union, List, Tuple, Dict, Any, Optional
 from pathlib import Path
 import logging
 
@@ -24,7 +23,7 @@ class ExtractionQualityVerifier:
     """
     def __init__(
         self,
-        output_dir: str | Path,
+        output_dir: Union[str, Path],
         ocr_accept: float = 0.95,
         ocr_review: float = 0.80,
         enable_languagetool: bool = False

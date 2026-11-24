@@ -1,8 +1,7 @@
-from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Union, List, Dict, Any, Optional, Tuple
 import logging
 
 from src.schemas import ChunkRecord, FactRecord, EntityIndexRecord, RelatedChunkGroup
@@ -22,7 +21,7 @@ class FactEntityExtractor:
     - Group cross-page related chunks (related_chunk_groups.jsonl).
     - Rule: Do not rely on embeddings alone; confirm identity & context.
     """
-    def __init__(self, output_dir: str | Path, vllm_client: VLLMClient):
+    def __init__(self, output_dir: Union[str, Path], vllm_client: VLLMClient):
         self.output_dir = Path(output_dir)
         self.facts_dir = self.output_dir / "facts"
         self.relationships_dir = self.output_dir / "relationships"

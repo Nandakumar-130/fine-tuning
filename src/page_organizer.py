@@ -1,6 +1,5 @@
-from __future__ import annotations
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Union, List, Dict, Any, Optional
 import logging
 
 from src.schemas import PageRecord, TextBlockRecord, TableRecord, ImageRecord, VerifiedRecord
@@ -16,7 +15,7 @@ class PageOrganizer:
       OCR blocks, table references, image references, and captions.
     - Save to pages/page_records.jsonl.
     """
-    def __init__(self, output_dir: str | Path):
+    def __init__(self, output_dir: Union[str, Path]):
         self.output_dir = Path(output_dir)
         self.pages_dir = self.output_dir / "pages"
         ensure_directory(self.pages_dir)

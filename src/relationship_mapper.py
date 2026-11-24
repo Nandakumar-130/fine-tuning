@@ -1,9 +1,8 @@
-from __future__ import annotations
 import re
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import Union, List, Dict, Any, Optional, Tuple, Set
 
 from src.schemas import (
     TextBlockRecord, TableRecord, ImageRecord,
@@ -22,7 +21,7 @@ class RelationshipMapper:
     cross-references, page continuity, and semantic similarity.
     Creates relationships.json and content_groups.json.
     """
-    def __init__(self, output_dir: str | Path):
+    def __init__(self, output_dir: Union[str, Path]):
         self.output_dir = Path(output_dir)
         self.extracted_dir = self.output_dir / "extracted_data"
         self.processed_dir = self.output_dir / "processed_data"
