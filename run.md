@@ -1,15 +1,32 @@
 # Execution & Run Commands Guide (Red Hat Linux)
 
-This guide provides the exact commands to set up, install dependencies, and run the PDF-to-Q&A dataset preparation pipeline on your **Red Hat Enterprise Linux (RHEL / CentOS / Rocky Linux / AlmaLinux)** server.
+This guide provides the exact commands to set up, install dependencies, resolve common server repository/network issues, and run the PDF-to-Q&A dataset preparation pipeline on your **Red Hat Enterprise Linux (RHEL / CentOS / Rocky Linux / AlmaLinux)** server.
 
 ---
 
-## 1. System Package Prerequisites
+## 1. Clean Git State & Pull Latest Code
 
-Run these commands using Red Hat's package manager (`dnf` or `yum`):
+If you encounter **"Applying autostash resulted in conflicts"** or local branch divergence, reset cleanly to the remote branch before pulling:
 
 ```bash
+# 1. Reset any local changes/conflicts
+git reset --hard HEAD
+git stash drop 2>/dev/null || true
+
+# 2. Pull the latest clean code from GitHub
+git pull origin main
+```
+
+---
+
+## 2. System Package Prerequisites (Fix for Docker 403 Error)
+
+If your corporate firewall/proxy blocks `download.docker.com` (giving `Status code: 403 for repomd.xml - Failed to download metadata for repo 'docker-ce-stable'`), disable that repository during install using `--disablerepo=docker-ce-stable`:
+
+```bash
+# Install core build libraries, OpenGL, GLib, and Java (disabling blocked corporate/docker repo)
 sudo dnf install -y \
+    --disablerepo=docker-ce-stable \
     curl \
     git \
     gcc \
@@ -22,32 +39,37 @@ sudo dnf install -y \
     python3-devel
 ```
 
-*(Note: If your server uses `yum` instead of `dnf`, run: `sudo yum install -y curl git gcc gcc-c++ make mesa-libGL glib2 glib2-devel java-11-openjdk-headless python3-devel`)*
+*(Note: If your system uses `yum` instead of `dnf`, run):*
+```bash
+sudo yum install -y --disablerepo=docker-ce-stable curl git gcc gcc-c++ make mesa-libGL glib2 glib2-devel java-11-openjdk-headless python3-devel
+```
+
+*(Optional: Permanently disable the blocked Docker repository so it never interrupts dnf again):*
+```bash
+sudo dnf config-manager --set-disabled docker-ce-stable 2>/dev/null || true
+```
 
 ---
 
-## 2. Virtual Environment Setup
+## 3. Virtual Environment Setup
 
-Always create a dedicated virtual environment and upgrade the build tools first:
+Always create a dedicated virtual environment and upgrade the packaging tools first:
 
 ```bash
-# 1. Pull the latest code
-git pull origin main
-
-# 2. Create the virtual environment (if not already created)
+# 1. Create the virtual environment (if not already created)
 python3 -m venv .venv
 
-# 3. Activate the virtual environment
+# 2. Activate the virtual environment
 source .venv/bin/activate
 
-# 4. CRITICAL: Upgrade pip, setuptools, and wheel
-# (This step is required on Python 3.9 so pre-built binary wheels match properly)
+# 3. CRITICAL: Upgrade pip, setuptools, and wheel
+# (Required on Python 3.9 so pre-built binary wheels match properly without source compilation)
 pip install --upgrade pip setuptools wheel
 ```
 
 ---
 
-## 3. Install Python Dependencies
+## 4. Install Python Dependencies
 
 Install all dependencies directly from PyPI using standard `pip`:
 
@@ -56,12 +78,12 @@ pip install -r requirements.txt
 ```
 
 > **Why this works seamlessly:**
-> - Bypasses all network/proxy/firewall blocks (no `curl` shell installer needed).
-> - `spacy` is pinned to `>=3.7.0,<3.8.0`, which provides pre-compiled `manylinux` binary wheels for Python 3.9 with zero C++ compilation or `thinc` errors.
+> - Completely avoids external script/curl 403 errors (no `astral.sh` or Docker needed).
+> - `spacy` is pinned to `>=3.7.0,<3.8.0`, which provides pre-compiled `manylinux` binary wheels for Python 3.9 with zero C++ compilation or `thinc` build errors.
 
 ---
 
-## 4. Verify Configuration (`.env`)
+## 5. Verify Configuration (`.env`)
 
 Check your `.env` configuration file:
 
@@ -69,7 +91,7 @@ Check your `.env` configuration file:
 cat .env
 ```
 
-Ensure the key settings match:
+Ensure the key settings match your environment:
 
 ```ini
 PDF_FILE_PATH=data_set_use.pdf
@@ -93,7 +115,7 @@ TRAIN_VAL_SPLIT_RATIO=0.85
 
 ---
 
-## 5. Execution Commands
+## 6. Execution Commands
 
 Make sure your virtual environment is active before running any command:
 ```bash
@@ -101,7 +123,7 @@ source .venv/bin/activate
 ```
 
 ### A. Run Two-Page Pilot Test (Safe Verification on Pages 7–8)
-Verifies text, KPI cards, charts, 5 chunking strategies, Q&A cascades, and SFT format export:
+Verifies text, KPI cards, charts, 5 chunking strategies, Q&A cascades, deduplication, and SFT export:
 
 ```bash
 python run_pilot.py --start-page 7 --end-page 8 --output-dir pilot_sample
@@ -135,7 +157,7 @@ tail -f pipeline_run.log
 
 ---
 
-## 6. Inspecting Generated Outputs
+## 7. Inspecting Generated Outputs
 
 After running the pilot or full pipeline, check the outputs:
 
@@ -157,10 +179,12 @@ cat pilot_sample/quality/quality_audit_report.json
 
 ---
 
-## 7. Troubleshooting Quick Reference
+## 8. Troubleshooting Quick Reference
 
 | Issue | Cause | Fix |
 | :--- | :--- | :--- |
+| `Status code: 403 ... docker-ce-stable` | Corporate firewall blocks Docker repo metadata. | Use `sudo dnf install -y --disablerepo=docker-ce-stable ...`. |
+| `Applying autostash resulted in conflicts` | Local changes collided with remote updates during pull. | Run `git reset --hard HEAD` and `git stash drop`, then `git pull origin main`. |
 | `sudo: apt-get: command not found` | Red Hat uses `dnf` or `yum`. | Use `sudo dnf install -y ...` (or `yum`). |
 | `curl: (22) error: 403` on astral.sh | Firewall/proxy blocked the script. | Do not use curl; use standard `pip install -r requirements.txt`. |
 | `bash: ~/.local/bin/env: No such file` | The curl script never ran. | Activate the venv directly with `source .venv/bin/activate`. |
