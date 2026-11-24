@@ -179,14 +179,41 @@ cat pilot_sample/quality/quality_audit_report.json
 
 ---
 
-## 8. Troubleshooting Quick Reference
+## 9. Server Diagnostics & Model Verification
 
-| Issue | Cause | Fix |
-| :--- | :--- | :--- |
-| `Status code: 403 ... docker-ce-stable` | Corporate firewall blocks Docker repo metadata. | Use `sudo dnf install -y --disablerepo=docker-ce-stable ...`. |
-| `Applying autostash resulted in conflicts` | Local changes collided with remote updates during pull. | Run `git reset --hard HEAD` and `git stash drop`, then `git pull origin main`. |
-| `sudo: apt-get: command not found` | Red Hat uses `dnf` or `yum`. | Use `sudo dnf install -y ...` (or `yum`). |
-| `curl: (22) error: 403` on astral.sh | Firewall/proxy blocked the script. | Do not use curl; use standard `pip install -r requirements.txt`. |
-| `bash: ~/.local/bin/env: No such file` | The curl script never ran. | Activate the venv directly with `source .venv/bin/activate`. |
-| `Failed to build spacy` / `thinc` | Python 3.9 on unpinned `spacy`. | Run `pip install -U pip setuptools wheel` then `pip install -r requirements.txt`. |
-| Terminal closes during long run | SSH session timed out. | Run with `nohup python main.py > pipeline_run.log 2>&1 &`. |
+### A. Locate Models on Server Disks
+Find where Qwen and BGE models are stored on `/data1`, `/data2`, or in your HuggingFace cache:
+```bash
+find /data1 /data2 -maxdepth 4 -type d \( -iname "*qwen*" -o -iname "*bge*" \) 2>/dev/null ; du -sh ~/.cache/huggingface/hub/*
+```
+
+### B. Check HuggingFace Cache Sizes
+Verify if model weights are fully downloaded or just empty metadata directories:
+```bash
+du -sh ~/.cache/huggingface/hub/models--*
+```
+
+### C. Verify Python Packages in 3 Seconds
+Check if all required pipeline packages are properly installed in your active environment:
+```bash
+python -c "
+mods = ['fitz', 'cv2', 'PIL', 'paddleocr', 'pydantic', 'torch', 'vllm', 'transformers', 'tqdm', 'sentence_transformers']
+for m in mods:
+    try:
+        __import__(m)
+        print(f'  [OK] {m}')
+    except ImportError:
+        print(f'  [MISSING] {m}')
+"
+```
+
+### D. Check GPU & CUDA Memory
+Verify GPU resources available for model loading:
+```bash
+nvidia-smi
+```
+And verify inside PyTorch:
+```bash
+python -c "import torch; print('CUDA Available:', torch.cuda.is_available()); print('Device Count:', torch.cuda.device_count()); print('Device Name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
+```
+
