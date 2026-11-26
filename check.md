@@ -1,228 +1,131 @@
-# Comprehensive Environment & Pipeline Check Guide
+# Server Model Discovery & Inventory Guide
 
-This document contains all individual test and verification commands to test whether every package, tool, GPU component, and model is installed and working on your Linux server.
+This document provides exact, dedicated commands to discover, inspect, and identify all AI models stored on your server disks (Text LLMs, Vision-Language VLMs, Embeddings, and Evaluation Judges).
 
 ---
 
-## 1. One-Shot Master Verification (All 20 Packages)
+## 1. Master Model Scanner: Discover All Models & Locations
 
-Run this single command to check all packages from `requirements.txt` at once with their installed versions:
+Run this single command on your server terminal to scan all disks (`/data1`, `/data2`, `/home`, `/opt`) and report every AI model found with its exact path, model type (Text, Vision, or Embedding), and disk size:
 
 ```bash
 python -c "
-import importlib
+import os
+from pathlib import Path
 
-packages = [
-    ('PyMuPDF (fitz)', 'fitz'),
-    ('pypdf', 'pypdf'),
-    ('opencv-python', 'cv2'),
-    ('Pillow', 'PIL'),
-    ('numpy', 'numpy'),
-    ('paddleocr', 'paddleocr'),
-    ('paddlepaddle', 'paddle'),
-    ('symspellpy', 'symspellpy'),
-    ('language-tool-python', 'language_tool_python'),
-    ('python-dateutil', 'dateutil'),
-    ('spacy', 'spacy'),
-    ('sentence-transformers', 'sentence_transformers'),
-    ('pydantic', 'pydantic'),
-    ('pydantic-settings', 'pydantic_settings'),
-    ('python-dotenv', 'dotenv'),
-    ('vllm', 'vllm'),
-    ('transformers', 'transformers'),
-    ('accelerate', 'accelerate'),
-    ('torch', 'torch'),
-    ('tqdm', 'tqdm')
-]
+search_roots = ['/data1', '/data2', '/home/aimlsvcadmin', '/opt']
+model_indicators = ['config.json', 'model.safetensors.index.json', 'pytorch_model.bin.index.json', 'tokenizer_config.json', 'preprocessor_config.json']
 
-installed = []
-not_installed = []
+print('=' * 80)
+print(' SCANNING SERVER DISKS FOR LOCAL AI MODELS...')
+print('=' * 80)
 
-for name, mod in packages:
-    try:
-        m = importlib.import_module(mod)
-        version = getattr(m, '__version__', 'installed')
-        installed.append((name, version))
-    except ImportError:
-        not_installed.append(name)
+found_models = []
 
-print('=' * 60)
-print(' INSTALLED PACKAGES:')
-print('=' * 60)
-for name, ver in installed:
-    print(f'  [✓] {name:<28} (version: {ver})')
+for root_dir in search_roots:
+    if not os.path.exists(root_dir):
+        continue
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        # Skip hidden git or cache debris
+        if '/.git/' in dirpath or '/.cache/' in dirpath:
+            continue
+        
+        has_config = 'config.json' in filenames
+        has_weights = any(f.endswith('.safetensors') or f.endswith('.bin') or f.endswith('.gguf') for f in filenames)
+        
+        if has_config and has_weights:
+            path_obj = Path(dirpath)
+            # Estimate folder size
+            try:
+                total_bytes = sum(f.stat().st_size for f in path_obj.glob('*') if f.is_file())
+                size_gb = round(total_bytes / (1024**3), 2)
+            except Exception:
+                size_gb = 0.0
 
-print('\n' + '=' * 60)
-print(' NOT INSTALLED / MISSING PACKAGES:')
-print('=' * 60)
-if not not_installed:
-    print('  All 20 packages are successfully installed!')
-else:
-    for name in not_installed:
-        print(f'  [✗] {name}')
-print('=' * 60)
+            # Detect model architecture type
+            model_type = 'Text LLM'
+            if any('vision' in f.lower() or 'processor' in f.lower() for f in filenames) or 'vl' in dirpath.lower() or 'vision' in dirpath.lower():
+                model_type = 'Vision-Language (VLM)'
+            elif 'bge' in dirpath.lower() or 'embed' in dirpath.lower() or 'sentence' in dirpath.lower():
+                model_type = 'Embedding Model'
+
+            found_models.append((dirpath, model_type, size_gb))
+
+print(f'\nTotal Models Found: {len(found_models)}\n')
+for idx, (path, mtype, sz) in enumerate(found_models, 1):
+    print(f'[{idx:02d}] Type: {mtype:<25} | Size: {sz:>6.2f} GB')
+    print(f'     Path: {path}\n')
+print('=' * 80)
 "
 ```
 
 ---
 
-## 2. Individual Package Functional Tests
+## 2. Inspect Found Model Directories in Detail
 
-Test each package individually to verify that it not only imports, but functions properly:
+Quickly inspect what files exist inside the model folders under `/data1/aimlDevTeam/`:
 
-### 2.1 PDF & Document Processing
-
-#### PyMuPDF (`fitz`) - Layout & Geometry
 ```bash
-python -c "import fitz; doc = fitz.open('data_set_use.pdf'); print('PyMuPDF OK: Total Pages =', len(doc))"
+ls -lh /data1/aimlDevTeam/QWEN /data1/aimlDevTeam/Qwen2_vlm /data1/aimlDevTeam/vlm /data1/aimlDevTeam/Qwen_API 2>/dev/null
 ```
 
-#### pypdf - PDF Tools
-```bash
-python -c "import pypdf; print('pypdf OK: version =', pypdf.__version__)"
-```
+Or view the folder tree structure up to 3 levels deep:
 
-#### OpenCV (`cv2`) - Image Preprocessing
 ```bash
-python -c "import cv2, numpy as np; img = np.zeros((100, 100, 3), dtype=np.uint8); gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY); print('OpenCV OK: version =', cv2.__version__)"
-```
-
-#### Pillow (`PIL`) - Image Handling
-```bash
-python -c "from PIL import Image; img = Image.new('RGB', (50, 50), color='white'); print('Pillow OK: version =', Image.__version__)"
-```
-
-#### NumPy - Numerical Arrays
-```bash
-python -c "import numpy as np; a = np.array([1, 2, 3]); print('NumPy OK: version =', np.__version__)"
+find /data1/aimlDevTeam/ -maxdepth 3 -type d 2>/dev/null
 ```
 
 ---
 
-### 2.2 OCR & Scanned Text Processing
+## 3. Verify Model Loading Capabilities
 
-#### PaddlePaddle - Deep Learning Backend
+Test whether your local Qwen models load cleanly into PyTorch and vLLM without downloading anything from the internet:
+
+### 3.1 Test Text Qwen Model Loading (Offline)
+Replace `/PATH/TO/YOUR/TEXT_QWEN` with the path discovered from Section 1:
+
 ```bash
-python -c "import paddle; print('PaddlePaddle OK: version =', paddle.__version__, '| CUDA compiled =', paddle.is_compiled_with_cuda())"
+python -c "
+from transformers import AutoTokenizer, AutoConfig
+model_path = '/data1/aimlDevTeam/QWEN'  # Update if inside a subfolder
+try:
+    cfg = AutoConfig.from_pretrained(model_path, local_files_only=True)
+    tok = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+    print(f'SUCCESS: Text Qwen Loaded! Architecture: {cfg.architectures}, Vocab: {tok.vocab_size}')
+except Exception as e:
+    print(f'Text Model Check Error: {e}')
+"
 ```
 
-#### PaddleOCR - Text Detection & Recognition
+### 3.2 Test Vision Qwen Model (VLM) Loading (Offline)
+Replace `/PATH/TO/YOUR/VISION_QWEN` with the path discovered from Section 1:
+
 ```bash
-python -c "from paddleocr import PaddleOCR; print('PaddleOCR import OK')"
-```
-
-#### PP-Structure - Table Layout Analysis
-```bash
-python -c "from paddleocr import PPStructure; print('PP-Structure import OK')"
-```
-
----
-
-### 2.3 Quality Verification & Linguistic Tools
-
-#### SymSpell - Spelling Validation
-```bash
-python -c "import symspellpy; print('SymSpell OK: version =', symspellpy.__version__)"
-```
-
-#### LanguageTool - Grammar Checker (Offline Check)
-```bash
-python -c "import language_tool_python; print('LanguageTool module OK: version =', language_tool_python.__version__)"
-```
-
-#### Python DateUtil - Calendar & Date Parsing
-```bash
-python -c "from dateutil import parser; d = parser.parse('2025-03-31'); print('DateUtil OK: parsed =', d)"
-```
-
-#### Decimal & Regex - Number & Monetary Validation
-```bash
-python -c "from decimal import Decimal; import re; val = Decimal('25000.50'); print('Decimal & Regex OK: val =', val)"
+python -c "
+from transformers import AutoProcessor, AutoConfig
+vl_path = '/data1/aimlDevTeam/Qwen2_vlm'  # Update if inside a subfolder
+try:
+    cfg = AutoConfig.from_pretrained(vl_path, local_files_only=True)
+    proc = AutoProcessor.from_pretrained(vl_path, local_files_only=True)
+    print(f'SUCCESS: Vision Qwen Loaded! Architecture: {cfg.architectures}')
+except Exception as e:
+    print(f'Vision Model Check Error: {e}')
+"
 ```
 
 ---
 
-### 2.4 Text Structuring & Embeddings
+## 4. How to Set the Paths in `.env`
 
-#### spaCy - Sentence & Entity Parsing
-```bash
-python -c "import spacy; print('spaCy OK: version =', spacy.__version__)"
-```
+Once you have identified the model paths from the scan above, update your `.env` file on your server:
 
-#### spaCy English Model (`en_core_web_sm`)
-```bash
-python -c "import spacy; nlp = spacy.load('en_core_web_sm'); doc = nlp('Larsen and Toubro is located in Chennai.'); print('spaCy en_core_web_sm OK: entities =', [(ent.text, ent.label_) for ent in doc.ents])"
-```
+```env
+# Primary Text Model (For Task 7 Facts, Tasks 9-13 Q&A Generation, Task 15 Judge Evaluation)
+VLLM_MODEL_NAME_OR_PATH=/path/to/your/discovered/text/qwen
 
-#### Sentence-Transformers - Embeddings Module
-```bash
-python -c "import sentence_transformers; print('SentenceTransformers OK: version =', sentence_transformers.__version__)"
-```
+# Vision-Language Model (For Task 4 Chart, Table, and Image Visual Understanding)
+VLLM_VL_MODEL_NAME_OR_PATH=/path/to/your/discovered/vision/qwen
 
-#### Local BGE Embedding Model Test
-```bash
-python -c "from sentence_transformers import SentenceTransformer; m = SentenceTransformer('BAAI/bge-small-en-v1.5', local_files_only=True); print('BGE Embedding Model OK (loaded from local cache)')"
-```
-
----
-
-### 2.5 Configuration & Settings
-
-#### Pydantic & Pydantic-Settings
-```bash
-python -c "import pydantic, pydantic_settings; print('Pydantic OK: version =', pydantic.__version__)"
-```
-
-#### Python-Dotenv - Environment Loader
-```bash
-python -c "import dotenv; from src.config import settings; print('Config OK: PDF =', settings.PDF_FILE_PATH, '| Output =', settings.OUTPUT_DIR)"
-```
-
----
-
-### 2.6 GPU, Inference & Deep Learning Models
-
-#### NVIDIA GPU Driver & VRAM (`nvidia-smi`)
-```bash
-nvidia-smi --query-gpu=name,memory.total,memory.free,driver_version --format=csv
-```
-
-#### PyTorch & CUDA Functionality
-```bash
-python -c "import torch; print('PyTorch OK: version =', torch.__version__); print('CUDA Available:', torch.cuda.is_available()); print('GPU Name:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No GPU'); print('VRAM Total (GB):', round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2) if torch.cuda.is_available() else 0)"
-```
-
-#### HuggingFace Transformers & Accelerate
-```bash
-python -c "import transformers, accelerate; print('Transformers OK: version =', transformers.__version__, '| Accelerate:', accelerate.__version__)"
-```
-
-#### vLLM - High-Throughput Inference Engine
-```bash
-python -c "import vllm; print('vLLM OK: version =', vllm.__version__)"
-```
-
-#### Qwen Model Local Cache Check
-```bash
-python -c "from transformers import AutoTokenizer; t = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-3B-Instruct', local_files_only=True); print('Qwen Tokenizer OK (loaded from offline local cache)')"
-```
-
----
-
-## 3. Server Disk & Model Storage Search
-
-Find all Qwen and BGE model folders stored across server disks:
-
-```bash
-find /data1 /data2 /home -maxdepth 4 -type d \( -iname "*qwen*" -o -iname "*bge*" \) 2>/dev/null ; du -sh ~/.cache/huggingface/hub/*
-```
-
----
-
-## 4. Full Pipeline Offline Integration Test Suite
-
-Run the master 34-case automated integration suite verifying every single stage:
-
-```bash
-python test_34_integration.py
+# Embedding Model (For Task 6 Topic Shifts & Task 8 Entity Linking)
+EMBEDDING_MODEL_NAME_OR_PATH=/path/to/your/discovered/bge/model
 ```
